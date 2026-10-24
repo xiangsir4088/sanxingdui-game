@@ -1,0 +1,2019 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>一眼三千年 · 三星堆祭司青铜头像</title>
+<style>
+  html,body{margin:0;height:100%;background:#04080a;overflow:hidden;
+    font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+    -webkit-user-select:none;user-select:none}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  canvas{display:block;background:#06100f;box-shadow:0 0 100px rgba(0,0,0,.9)}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="1280" height="720"></canvas></div>
+<script>
+"use strict";
+
+/* ============================================================
+   一眼三千年 —— 三星堆祭司青铜头像 · 闯关小游戏
+   支持：键盘 / 手柄   离线可运行
+   ============================================================ */
+
+const W = 1280, H = 720;
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+
+function fit() {
+  const ratio = W / H, w = innerWidth, h = innerHeight;
+  let cw = w, ch = w / ratio;
+  if (ch > h) { ch = h; cw = h * ratio; }
+  cv.style.width = cw + 'px';
+  cv.style.height = ch + 'px';
+}
+addEventListener('resize', fit);
+fit();
+
+/* ================= 运行环境自检 ================= */
+// Chrome 的 Gamepad API 受权限策略限制，在跨源 iframe（IDE 预览窗等）里会被直接屏蔽
+const IN_IFRAME = (() => { try { return window.self !== window.top; } catch (e) { return true; } })();
+const HAS_GAMEPAD_API = typeof navigator.getGamepads === 'function';
+// Chrome 还要求页面先获得"用户激活"（点一下 / 按一下键盘）才会暴露手柄数据，否则 getGamepads() 一直为空
+let pageActivated = false;
+const markActivated = () => { pageActivated = true; };
+addEventListener('pointerdown', markActivated, true);
+addEventListener('keydown', markActivated, true);
+
+/* ================= 文物配图（馆方资料，本地文件） ================= */
+const poster = new Image();
+let posterReady = false;
+poster.onload = () => { posterReady = true; };
+poster.src = 'poster.jpg';
+
+// 从展览海报中裁出文物本体（1080×1920 原图）
+const CROP = { sx: 340, sy: 650, sw: 480, sh: 950 };
+
+function drawArtifact(cx, cy, dh, alpha) {
+  if (!posterReady) return false;
+  const dw = dh * (CROP.sw / CROP.sh);
+  ctx.save();
+  ctx.globalAlpha = alpha === undefined ? 1 : alpha;
+  ctx.drawImage(poster, CROP.sx, CROP.sy, CROP.sw, CROP.sh, cx - dw / 2, cy - dh / 2, dw, dh);
+  ctx.restore();
+  return true;
+}
+
+/* ================= 输入 ================= */
+const keys = Object.create(null);
+const pressed = new Set();
+let clickEdge = false;
+
+addEventListener('keydown', e => {
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+  if (!e.repeat) pressed.add(e.code);
+  keys[e.code] = true;
+  resumeAudio();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+/* ---- 鼠标 / 触控：坐标换算与退出按钮 ---- */
+const BTN_EXIT = { x: W - 146, y: 26, w: 110, h: 38 };
+const mouse = { x: -999, y: -999 };
+function toCanvas(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height };
+}
+function inExit(p) {
+  return p.x > BTN_EXIT.x && p.x < BTN_EXIT.x + BTN_EXIT.w &&
+         p.y > BTN_EXIT.y && p.y < BTN_EXIT.y + BTN_EXIT.h;
+}
+function toTitle() { state = 'title'; stateT = 0; }
+cv.addEventListener('pointermove', e => { const p = toCanvas(e); mouse.x = p.x; mouse.y = p.y; });
+const BTN_OPEN = { x: W / 2 - 110, y: 470, w: 220, h: 44 };
+function inOpen(p) { return p.x > BTN_OPEN.x && p.x < BTN_OPEN.x + BTN_OPEN.w &&
+                            p.y > BTN_OPEN.y && p.y < BTN_OPEN.y + BTN_OPEN.h; }
+cv.addEventListener('pointerdown', e => {
+  const p = toCanvas(e);
+  mouse.x = p.x; mouse.y = p.y;
+  resumeAudio();
+  if (inExit(p)) { toTitle(); return; }
+  if (IN_IFRAME && state === 'title' && inOpen(p)) { window.open(location.href, '_blank'); return; }
+  clickEdge = true;
+});
+
+const pad = { left: false, right: false, jump: false, jumpEdge: false, startEdge: false,
+              backEdge: false, connected: false, name: '', count: 0, dbg: '', axes: '' };
+let padStartPrev = false, padJumpPrev = false, padBackPrev = false;
+
+function pollPad() {
+  let list = [];
+  try { list = navigator.getGamepads ? navigator.getGamepads() : []; } catch (e) { list = []; }
+  let gp = null, n = 0;
+  for (const g of list) { if (g && g.connected) { n++; if (!gp) gp = g; } }
+  pad.count = n;
+  pad.jumpEdge = false;
+  pad.startEdge = false;
+  pad.backEdge = false;
+  if (!gp) {
+    pad.left = pad.right = pad.jump = false;
+    pad.connected = false;
+    pad.dbg = '';
+    return;
+  }
+  pad.connected = true;
+  pad.name = gp.id || '';
+  const ax = gp.axes[0] || 0;
+  const b = i => !!(gp.buttons[i] && gp.buttons[i].pressed);
+  const pressedIdx = [];
+  for (let i = 0; i < gp.buttons.length; i++) if (b(i)) pressedIdx.push(i);
+  pad.dbg = pressedIdx.join(',');
+  pad.axes = Array.prototype.map.call(gp.axes, v => v.toFixed(2)).join(' ');
+
+  // 左摇杆（部分非标准手柄把左摇杆放在 axes[2]）
+  const ax0 = gp.axes.length > 0 ? gp.axes[0] : 0;
+  const axH = (gp.axes.length > 2 && Math.abs(ax0) < 0.2 && Math.abs(gp.axes[2]) > 0.5 &&
+               Math.abs(gp.axes[2]) < 1.01) ? gp.axes[2] : ax0;
+  // 十字键：标准映射走按钮 14/15；非标准手柄常把 POV 帽放在 axes[9]（值 -1 / 0 / 1）
+  const hat = gp.axes.length > 9 ? gp.axes[9] : 0;
+  pad.left = axH < -0.30 || b(14) || hat < -0.5;
+  pad.right = axH > 0.30 || b(15) || hat > 0.5;
+  // 跳跃：A(0)；兼容部分手柄映射到 X(2)/Y(3)
+  const j = b(0) || b(2) || b(3);
+  if (j && !padJumpPrev) pad.jumpEdge = true;
+  padJumpPrev = j;
+  pad.jump = j;
+  // 开始 / 继续
+  const s = b(9);
+  if (s && !padStartPrev) pad.startEdge = true;
+  padStartPrev = s;
+  // 退出：B(1) 或 Back(8)
+  const k = b(1) || b(8);
+  if (k && !padBackPrev) pad.backEdge = true;
+  padBackPrev = k;
+  if (pad.name === undefined) pad.name = '';
+}
+
+addEventListener('gamepadconnected', e => {
+  pad.connected = true;
+  pad.name = e.gamepad && e.gamepad.id ? e.gamepad.id : '';
+});
+addEventListener('gamepaddisconnected', () => { pad.connected = false; });
+
+const input = { left: false, right: false, jumpHeld: false, jumpEdge: false, startEdge: false };
+
+function gatherInput() {
+  pollPad();
+  input.left = !!(keys['ArrowLeft'] || keys['KeyA']) || pad.left;
+  input.right = !!(keys['ArrowRight'] || keys['KeyD']) || pad.right;
+  input.jumpHeld = !!(keys['Space'] || keys['ArrowUp'] || keys['KeyW'] || keys['KeyJ']) || pad.jump;
+  input.jumpEdge = pressed.has('Space') || pressed.has('ArrowUp') || pressed.has('KeyW') ||
+                   pressed.has('KeyJ') || pad.jumpEdge;
+  input.startEdge = pressed.has('Enter') || pressed.has('Space') || pad.startEdge ||
+                    pad.jumpEdge || clickEdge;
+  clickEdge = false;
+}
+
+/* ================= 音效（WebAudio 合成） ================= */
+let audioCtx = null;
+function resumeAudio() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audioCtx = null; }
+  }
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+}
+function tone(freq, dur, type, vol) {
+  if (!audioCtx) return;
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.type = type || 'sine';
+  o.frequency.value = freq;
+  g.gain.value = 0;
+  const now = audioCtx.currentTime;
+  g.gain.linearRampToValueAtTime(vol || 0.12, now + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(now); o.stop(now + dur + 0.05);
+}
+
+/* ================= 关卡 ================= */
+// plats: [x, y顶, w, h]
+const LEVELS = [
+  {
+    theme: 'forge', name: '一 · 炉火铸形', width: 2600,
+    spawn: { x: 110, y: 540 }, goal: { x: 2470, y: 620 },
+    plats: [
+      [0, 620, 700, 120], [920, 620, 560, 120], [1680, 620, 920, 120],
+      [280, 470, 180, 26], [1100, 470, 180, 26], [1900, 450, 200, 26]
+    ],
+    motes: [{ x: 370, y: 415 }, { x: 1190, y: 415 }, { x: 2000, y: 395 }],
+    line: '它先是一团火。商代的风箱吹亮炉膛，铜与锡在范里凝成一张脸。',
+    hazards: [
+      { t: 'fire', x: 810, gy: 726, w: 74, hgt: 258, warn: 0.85, on: 1.15, off: 1.4, ph: 0.0 },
+      { t: 'fire', x: 1400, gy: 620, w: 58, hgt: 156, warn: 0.8, on: 1.0, off: 1.5, ph: 1.2 },
+      { t: 'fire', x: 2280, gy: 620, w: 58, hgt: 156, warn: 0.8, on: 1.0, off: 1.5, ph: 2.4 }
+    ],
+    lines: [
+      { x: 300, text: '商代的风箱吹亮炉膛。' },
+      { x: 1000, text: '铜与锡熔成铜液，注入合范。' },
+      { x: 1900, text: '一张青铜的脸，从熔铜里浮出成形。' }
+    ]
+  },
+  {
+    theme: 'ritual', name: '二 · 祭坛之夜', width: 2800,
+    spawn: { x: 110, y: 540 }, goal: { x: 2610, y: 620 },
+    plats: [
+      [0, 620, 640, 120], [840, 620, 560, 120], [1600, 620, 480, 120], [2280, 620, 520, 120],
+      [240, 460, 170, 26], [900, 450, 170, 26], [1660, 470, 170, 26], [2320, 450, 170, 26]
+    ],
+    motes: [{ x: 325, y: 405 }, { x: 985, y: 395 }, { x: 1745, y: 415 }],
+    line: '它被抬上祭坛，看过火，也看过跪拜的人。',
+    hazards: [
+      { t: 'fire', x: 700, gy: 620, w: 60, hgt: 168, warn: 0.8, on: 1.1, off: 1.3, ph: 0.4 },
+      { t: 'fire', x: 1420, gy: 620, w: 60, hgt: 168, warn: 0.8, on: 1.1, off: 1.3, ph: 1.5 },
+      { t: 'fire', x: 2100, gy: 620, w: 60, hgt: 168, warn: 0.8, on: 1.1, off: 1.3, ph: 2.6 },
+      { t: 'fire', x: 2450, gy: 620, w: 60, hgt: 168, warn: 0.8, on: 1.1, off: 1.3, ph: 0.9 }
+    ],
+    lines: [
+      { x: 320, text: '它被抬上祭坛，立于中央。' },
+      { x: 1100, text: '火光自下而上，照亮它的双耳。' },
+      { x: 1900, text: '跪拜的人俯下身，烟升向夜空。' }
+    ]
+  },
+  {
+    theme: 'burial', name: '三 · 深埋千年', width: 2800,
+    spawn: { x: 110, y: 540 }, goal: { x: 2610, y: 620 },
+    plats: [
+      [0, 620, 560, 120], [760, 620, 480, 120], [1440, 620, 600, 120], [2240, 620, 560, 120],
+      [180, 450, 160, 26], [820, 440, 160, 26], [1500, 460, 160, 26], [2350, 452, 170, 26]
+    ],
+    motes: [{ x: 260, y: 395 }, { x: 900, y: 385 }, { x: 2430, y: 388 }],
+    line: '后来它被埋进土里，绿锈一寸寸爬上眼角。',
+    hazards: [
+      { t: 'rust', x: 420, gy: 620, w: 58, hgt: 150, warn: 0.7, on: 1.05, off: 1.15, ph: 0.0 },
+      { t: 'rust', x: 1000, gy: 620, w: 58, hgt: 150, warn: 0.7, on: 1.05, off: 1.15, ph: 0.9 },
+      { t: 'rust', x: 1700, gy: 620, w: 58, hgt: 150, warn: 0.7, on: 1.05, off: 1.15, ph: 1.8 },
+      { t: 'rust', x: 2500, gy: 620, w: 58, hgt: 150, warn: 0.7, on: 1.05, off: 1.15, ph: 2.7 }
+    ],
+    lines: [
+      { x: 300, text: '泥土自上方倾泻，覆盖面孔的下半部。' },
+      { x: 1050, text: '时间开始加速。' },
+      { x: 1900, text: '孔雀绿的锈，如藤蔓从眼角向外蔓延。' }
+    ]
+  },
+  {
+    theme: 'dig', name: '四 · 一九八六·重光', width: 3000,
+    spawn: { x: 110, y: 540 }, goal: { x: 2810, y: 620 },
+    plats: [
+      [0, 620, 600, 120], [800, 620, 520, 120], [1520, 620, 480, 120], [2200, 620, 800, 120],
+      [200, 460, 160, 26], [860, 440, 160, 26], [1580, 450, 160, 26], [2260, 440, 160, 26]
+    ],
+    motes: [{ x: 280, y: 405 }, { x: 940, y: 385 }, { x: 2340, y: 385 }],
+    line: '1986 年，广汉，二号祭祀坑。刷子扫开泥土，它重新看见了光。',
+    hazards: [
+      { t: 'rock', x: 420, gy: 620, size: 62, yTop: 120, warn: 0.8, on: 0.7, off: 1.5, ph: 0.0 },
+      { t: 'rock', x: 1150, gy: 620, size: 62, yTop: 100, warn: 0.8, on: 0.7, off: 1.5, ph: 0.8 },
+      { t: 'rock', x: 1830, gy: 620, size: 62, yTop: 130, warn: 0.8, on: 0.7, off: 1.5, ph: 1.6 },
+      { t: 'rock', x: 2600, gy: 620, size: 62, yTop: 110, warn: 0.8, on: 0.7, off: 1.5, ph: 2.4 }
+    ],
+    lines: [
+      { x: 300, text: '探方里，黄土层一层层被剥开。' },
+      { x: 1100, text: '软毛刷扫过，杏眼的位置刚露出一点。' },
+      { x: 2000, text: '它重新看见了光。' }
+    ]
+  },
+  {
+    theme: 'museum', name: '五 · 展柜对视', width: 2400,
+    spawn: { x: 110, y: 540 }, goal: { x: 2180, y: 620 },
+    plats: [
+      [0, 620, 2400, 120],
+      [400, 470, 200, 26], [1000, 445, 200, 26], [1600, 470, 200, 26]
+    ],
+    motes: [{ x: 500, y: 415 }, { x: 1100, y: 375 }, { x: 1700, y: 415 }],
+    line: '今天，它站在东莞的展柜里，与你对视。',
+    hazards: [
+      { t: 'laser', x0: 260, x1: 1020, y: 250, w: 26, hgt: 370, spd: 190, ph: 0.0 },
+      { t: 'laser', x0: 1160, x1: 1980, y: 250, w: 26, hgt: 370, spd: 160, ph: 0.6 }
+    ],
+    lines: [
+      { x: 300, text: '展厅里，射灯的光柱缓缓扫过。' },
+      { x: 1100, text: '玻璃反光中，观众的身影驻足又离开。' },
+      { x: 1800, text: '它站在展柜里，等你走近。' }
+    ]
+  }
+];
+
+/* ================= 物理常量（已验证） ================= */
+const GRAV = 2600, MAXFALL = 1300;
+const SPEED = 340, ACC = 2600, FRIC = 2400;
+const JUMP = 1040, COYOTE = 0.10, BUFFER = 0.10;
+const STEP = 1 / 120;
+
+const player = {
+  x: 0, y: 0, r: 27, vx: 0, vy: 0,
+  grounded: false, coyote: 0, buffer: 0, face: 1,
+  sx: 1, sy: 1, inv: 0
+};
+
+const cam = { x: 0 };
+let levelIdx = 0, level = LEVELS[0];
+let state = 'title';
+let tGlobal = 0, stateT = 0;
+let collected = 0;
+const motes = [];
+let burst = [];
+
+/* ---- 生命 / 死亡 ---- */
+const MAXHP = 3;
+let haz = [];
+let hurtFlash = 0, deathTimer = 0, shakeT = 0;
+
+/* ---- 逐段旁白 ---- */
+let sub = null, lineIdx = 0;
+
+function loadLevel(i) {
+  levelIdx = i;
+  level = LEVELS[i];
+  player.x = level.spawn.x;
+  player.y = level.spawn.y;
+  player.vx = player.vy = 0;
+  player.grounded = false;
+  player.coyote = 0;
+  player.buffer = 0;
+  player.face = 1;
+  player.sx = player.sy = 1;
+  player.inv = 0;
+  player.hp = MAXHP;
+  cam.x = 0;
+  collected = 0;
+  motes.length = 0;
+  for (const m of level.motes) motes.push({ x: m.x, y: m.y, taken: false });
+  burst = [];
+  haz = (level.hazards || []).map(h => Object.assign({}, h, { rect: null, cur: 0, firing: false }));
+  lineIdx = 0;
+  sub = null;
+  hurtFlash = 0;
+  deathTimer = 0;
+  shakeT = 0;
+}
+
+function respawn() {
+  player.x = level.spawn.x;
+  player.y = level.spawn.y;
+  player.vx = player.vy = 0;
+  player.inv = 1.0;
+  player.hp = MAXHP;
+  deathTimer = 0;
+}
+
+/* 受伤：扣血 + 无敌 + 击退；血量归零后整关重来 */
+function hurt(fromX) {
+  if (player.inv > 0 || deathTimer > 0) return;
+  player.hp--;
+  player.inv = 1.25;
+  hurtFlash = 0.4;
+  shakeT = 0.28;
+  player.vx = (player.x < fromX ? -1 : 1) * 320;
+  player.vy = -440;
+  player.grounded = false;
+  tone(140, 0.28, 'square', 0.13);
+  if (player.hp <= 0) { deathTimer = 0.95; deathFlashOn(); }
+}
+function deathFlashOn() { hurtFlash = 1.0; }
+
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+/* ================= 危险物 ================= */
+function updateHazards(dt) {
+  const hw = player.r * 0.74;
+  for (const h of haz) {
+    h.rect = null;
+    h.firing = false;
+
+    if (h.t === 'laser') {
+      const span = h.x1 - h.x0;
+      const tp = (tGlobal * h.spd / span + (h.year || 0) + (h.ph || 0)) % 2;
+      const k = tp < 1 ? tp : 2 - tp;
+      const cx = h.x0 + span * k;
+      h.firing = true;
+      h.cur = cx;
+      h.rect = { x: cx - h.w / 2, y: h.y, w: h.w, h: h.hgt };
+    } else if (h.t === 'rock') {
+      const per = h.warn + h.on + h.off;
+      const tp = (tGlobal + (h.ph || 0)) % per;
+      if (tp < h.warn) {
+        h.cx = h.yTop;
+        h.warning = true;
+      } else if (tp < h.warn + h.on) {
+        h.warning = false;
+        h.firing = true;
+        const p = (tp - h.warn) / h.on;
+        h.cx = h.yTop + (h.gy - h.yTop - h.size) * Math.min(1, p * 1.7);
+        h.rect = { x: h.x - h.size / 2, y: h.cx, w: h.size, h: h.size };
+      } else {
+        h.warning = false;
+        h.cx = h.gy - h.size;
+      }
+    } else {
+      const per = h.warn + h.on + h.off;
+      const tp = (tGlobal + (h.ph || 0)) % per;
+      h.warning = tp < h.warn;
+      h.firing = tp >= h.warn && tp < h.warn + h.on;
+      h.cur = h.firing ? h.hgt * Math.min(1, (tp - h.warn) / 0.13) : 0;
+      if (h.firing && h.cur > 8) {
+        h.rect = { x: h.x - h.w / 2, y: h.gy - h.cur, w: h.w, h: h.cur };
+      }
+    }
+
+    if (h.rect && player.inv <= 0 && deathTimer <= 0) {
+      const r = h.rect;
+      if (player.x + hw > r.x && player.x - hw < r.x + r.w &&
+          player.y + player.r > r.y && player.y - player.r < r.y + r.h) {
+        hurt(r.x + r.w / 2);
+      }
+    }
+  }
+}
+
+/* ================= 逐段旁白 ================= */
+function updateSubs(dt) {
+  const L = level.lines || [];
+  while (lineIdx < L.length && player.x > L[lineIdx].x) {
+    sub = { text: L[lineIdx].text, life: 4.8, max: 4.8 };
+    lineIdx++;
+  }
+  if (sub) { sub.life -= dt; if (sub.life <= 0) sub = null; }
+}
+
+/* ================= 物理步进 ================= */
+function step(dt) {
+  const dir = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+  if (dir !== 0) {
+    player.vx += dir * ACC * dt;
+    player.vx = clamp(player.vx, -SPEED, SPEED);
+    player.face = dir;
+  } else {
+    const d = FRIC * dt;
+    if (Math.abs(player.vx) <= d) player.vx = 0;
+    else player.vx -= Math.sign(player.vx) * d;
+  }
+
+  if (input.jumpEdge) player.buffer = BUFFER;
+  else player.buffer = Math.max(0, player.buffer - dt);
+
+  if (player.grounded) player.coyote = COYOTE;
+  else player.coyote = Math.max(0, player.coyote - dt);
+
+  if (player.buffer > 0 && player.coyote > 0) {
+    player.vy = -JUMP;
+    player.buffer = 0;
+    player.coyote = 0;
+    player.grounded = false;
+  }
+  if (!input.jumpHeld && player.vy < 0) player.vy += GRAV * 2.2 * dt;
+
+  player.vy += GRAV * dt;
+  if (player.vy > MAXFALL) player.vy = MAXFALL;
+
+  const hw = player.r * 0.72;
+
+  /* --- 水平位移 + 侧向碰撞 --- */
+  const prevX = player.x;
+  player.x += player.vx * dt;
+  for (const pl of level.plats) {
+    const px = pl[0], py = pl[1], pw = pl[2], ph = pl[3];
+    if (player.y + player.r > py && player.y - player.r < py + ph) {
+      if (player.x + hw > px && prevX + hw <= px) { player.x = px - hw; player.vx = 0; }
+      else if (player.x - hw < px + pw && prevX - hw >= px + pw) { player.x = px + pw + hw; player.vx = 0; }
+    }
+  }
+  if (player.x < player.r) { player.x = player.r; player.vx = 0; }
+  if (player.x > level.width - player.r) { player.x = level.width - player.r; player.vx = 0; }
+
+  /* --- 垂直位移 + 扫掠落地（prevBottom 必须在积分前记录） --- */
+  const prevBottom = player.y + player.r;
+  const prevTop = player.y - player.r;
+  player.y += player.vy * dt;
+
+  let onGround = false;
+  for (const pl of level.plats) {
+    const px = pl[0], py = pl[1], pw = pl[2], ph = pl[3];
+    if (player.x + hw <= px || player.x - hw >= px + pw) continue;
+    if (player.vy >= 0 && prevBottom <= py + 1 && player.y + player.r >= py) {
+      player.y = py - player.r;
+      player.vy = 0;
+      onGround = true;
+    } else if (player.vy < 0 && prevTop >= py + ph - 1 && player.y - player.r <= py + ph) {
+      player.y = py + ph + player.r;
+      player.vy = 0;
+    }
+  }
+  player.grounded = onGround;
+
+  if (player.y > H + 240) respawn();
+
+  player.inv = Math.max(0, player.inv - dt);
+
+  /* --- 收集光尘 --- */
+  for (const m of motes) {
+    if (m.taken) continue;
+    const dx = m.x - player.x, dy = m.y - player.y;
+    if (dx * dx + dy * dy < 2600) {
+      m.taken = true;
+      collected++;
+      tone(660 + collected * 90, 0.35, 'sine', 0.10);
+      for (let i = 0; i < 14; i++) {
+        burst.push({
+          x: m.x, y: m.y,
+          vx: (Math.random() - 0.5) * 220,
+          vy: (Math.random() - 0.5) * 220 - 60,
+          life: 0.6, max: 0.6
+        });
+      }
+    }
+  }
+
+  /* --- 相机 --- */
+  const target = clamp(player.x - W * 0.38, 0, Math.max(0, level.width - W));
+  cam.x += (target - cam.x) * Math.min(1, dt * 9);
+
+  /* --- 终点判定 --- */
+  const atGoal = Math.abs(player.x - level.goal.x) < 50 &&
+                 Math.abs((player.y + player.r) - level.goal.y) < 100;
+  if (atGoal && collected >= level.motes.length) {
+    state = 'clear';
+    stateT = 0;
+    tone(523, 0.5, 'sine', 0.10);
+    setTimeout(() => tone(784, 0.7, 'sine', 0.09), 120);
+  }
+
+  /* --- 挤压拉伸 --- */
+  const tsx = player.grounded ? (Math.abs(player.vx) > 40 ? 1.07 : 1.01) : 0.95;
+  const tsy = player.grounded ? (Math.abs(player.vx) > 40 ? 0.95 : 1.00) : 1.05;
+  player.sx += (tsx - player.sx) * Math.min(1, dt * 12);
+  player.sy += (tsy - player.sy) * Math.min(1, dt * 12);
+
+  /* --- 危险物 / 旁白 / 受击表现 --- */
+  updateHazards(dt);
+  updateSubs(dt);
+  hurtFlash = Math.max(0, hurtFlash - dt * 1.6);
+  shakeT = Math.max(0, shakeT - dt);
+
+  if (deathTimer > 0) {
+    deathTimer -= dt;
+    if (deathTimer <= 0) loadLevel(levelIdx);   // 血量耗尽：本关重来
+  }
+}
+
+/* ================= 主题配色 ================= */
+const THEME = {
+  forge:   { sky: ['#0a0d10', '#181008', '#2a1408'], accent: '#ff8a3c', plat: ['#4a3a2c', '#241a12'] },
+  ritual:  { sky: ['#060b18', '#0d1730', '#1a1a2a'], accent: '#ffb55a', plat: ['#3a3a48', '#15151d'] },
+  burial:  { sky: ['#0d0b08', '#221a12', '#2f2317'], accent: '#8fbe7a', plat: ['#4a3a28', '#1d1710'] },
+  dig:     { sky: ['#1b2018', '#3a3524', '#5a4a32'], accent: '#ffe6a6', plat: ['#7a6444', '#3c3020'] },
+  museum:  { sky: ['#05080c', '#0a1018', '#121a24'], accent: '#ffe9b8', plat: ['#2c2e38', '#101218'] }
+};
+
+/* ================= 背景绘制 ================= */
+function radialGlow(x, y, r, color) {
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, color);
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(x - r, y - r, r * 2, r * 2);
+}
+
+function drawSky(theme) {
+  const th = THEME[theme];
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, th.sky[0]);
+  g.addColorStop(0.55, th.sky[1]);
+  g.addColorStop(1, th.sky[2]);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawFarMountains(par, color, baseY, amp, stepW) {
+  const off = cam.x * par;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(-40, H);
+  for (let i = 0; i <= Math.ceil(W / stepW) + 2; i++) {
+    const x = i * stepW - (off % stepW) - stepW;
+    const y = baseY - Math.sin(i * 1.1 + par * 10) * amp - Math.cos(i * 0.6) * amp * 0.6;
+    ctx.lineTo(x, y);
+    ctx.lineTo(x + stepW / 2, y + amp * 0.7);
+  }
+  ctx.lineTo(W + 40, H);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// 铸造：炉体、陶范、铜液、火星
+function bgForge() {
+  drawSky('forge');
+  drawFarMountains(0.16, 'rgba(24,14,8,0.92)', 470, 60, 210);
+  drawFarMountains(0.30, 'rgba(14,9,6,0.96)', 545, 40, 170);
+
+  // 远处陶范（合范土块）剪影
+  for (let k = 0; k < 6; k++) {
+    const mx = 1300 + k * 420 - cam.x * 0.45;
+    if (mx < -260 || mx > W + 260) continue;
+    const mh = 150 + (k % 3) * 50;
+    ctx.fillStyle = 'rgba(22,16,11,0.92)';
+    ctx.beginPath();
+    ctx.moveTo(mx - 70, 620);
+    ctx.lineTo(mx - 54, 620 - mh);
+    ctx.lineTo(mx + 54, 620 - mh);
+    ctx.lineTo(mx + 70, 620);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = 'rgba(120,70,35,0.15)';
+    ctx.fillRect(mx - 54, 620 - mh, 108, 6);
+  }
+
+  // 炉体（远处背景，视差较慢）
+  const fx = 260 - cam.x * 0.34;
+  const flick = 0.82 + 0.18 * Math.sin(tGlobal * 7.3) + 0.08 * Math.sin(tGlobal * 13.1);
+  ctx.save();
+  ctx.fillStyle = 'rgba(13,9,6,0.94)';
+  ctx.beginPath();
+  ctx.moveTo(fx - 120, 620);
+  ctx.lineTo(fx - 86, 372);
+  ctx.lineTo(fx - 68, 350);
+  ctx.lineTo(fx + 68, 350);
+  ctx.lineTo(fx + 86, 372);
+  ctx.lineTo(fx + 120, 620);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+
+  // 炉膛口与火光
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  radialGlow(fx, 452, 230 * flick, 'rgba(255,110,35,0.20)');
+  radialGlow(fx, 452, 104 * flick, 'rgba(255,165,60,0.32)');
+  ctx.fillStyle = `rgba(255,190,90,${0.5 * flick})`;
+  ctx.beginPath();
+  ctx.moveTo(fx - 56, 452);
+  ctx.lineTo(fx - 36, 388);
+  ctx.lineTo(fx + 36, 388);
+  ctx.lineTo(fx + 56, 452);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = 'rgba(8,5,3,0.65)';
+  ctx.fillRect(fx - 36, 392, 72, 16);
+
+  // 上升火星
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < 60; i++) {
+    const seed = i * 137.5;
+    const rise = (tGlobal * (48 + (i % 6) * 22) + seed * 3.7) % 820;
+    const px = fx + Math.sin(tGlobal * 1.4 + seed) * (40 + (i % 5) * 18);
+    const py = 452 - rise;
+    if (py < -20 || py > H + 20) continue;
+    const a = Math.max(0, 0.62 * (1 - rise / 800)) * (0.5 + 0.5 * Math.abs(Math.sin(tGlobal * 4 + i)));
+    ctx.fillStyle = `rgba(255,${140 + (i % 70)},60,${a})`;
+    ctx.fillRect(px, py, 2.4, 2.4);
+  }
+  ctx.restore();
+
+  // 地面铜液流
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < 5; i++) {
+    const y = 636 + i * 15;
+    const ph = Math.sin(tGlobal * 1.4 + i) * 0.5 + 0.5;
+    ctx.strokeStyle = `rgba(255,${90 + i * 22},30,${0.10 + ph * 0.14})`;
+    ctx.lineWidth = 2 + ph * 2.4;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    for (let x = 0; x <= W; x += 40) {
+      ctx.lineTo(x, y + Math.sin((x + cam.x) * 0.01 + tGlobal * 2 + i) * 7);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// 祭祀：夜空、祭火、跪拜剪影、烟
+function bgRitual() {
+  drawSky('ritual');
+  drawFarMountains(0.14, 'rgba(10,16,30,0.9)', 450, 70, 230);
+  drawFarMountains(0.28, 'rgba(6,10,20,0.95)', 540, 45, 180);
+  // 星
+  for (let i = 0; i < 40; i++) {
+    const sx = ((i * 733 + cam.x * 0.04) % W + W) % W;
+    const sy = (i * 137) % 340;
+    const a = 0.2 + 0.5 * Math.abs(Math.sin(tGlobal * 1.2 + i));
+    ctx.fillStyle = `rgba(200,220,255,${a})`;
+    ctx.fillRect(sx, sy, 1.6, 1.6);
+  }
+  // 祭火（世界坐标处的火堆）
+  const fireX = 2300 - cam.x;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  radialGlow(fireX, 590, 300, 'rgba(255,140,50,0.16)');
+  for (let i = 0; i < 3; i++) {
+    const f = 0.7 + 0.3 * Math.sin(tGlobal * 4 + i * 1.7);
+    radialGlow(fireX + Math.sin(tGlobal * 2 + i) * 20, 600 - i * 18, 90 * f, `rgba(255,${140 - i * 25},60,0.30)`);
+  }
+  ctx.restore();
+  // 烟
+  ctx.save();
+  for (let i = 0; i < 6; i++) {
+    const sx = fireX + Math.sin(tGlobal * 0.7 + i) * 90;
+    const sy = 520 - i * 60 - (tGlobal * 14 % 60);
+    ctx.fillStyle = `rgba(120,110,110,${0.05 + i * 0.012})`;
+    ctx.beginPath();
+    ctx.ellipse(sx, sy, 90 + i * 18, 46 + i * 12, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+  // 跪拜剪影
+  for (let i = 0; i < 4; i++) {
+    const kx = 2100 + i * 130 - cam.x;
+    if (kx < -80 || kx > W + 80) continue;
+    const lean = Math.sin(tGlobal * 0.8 + i) * 0.06;
+    ctx.save();
+    ctx.translate(kx, 620);
+    ctx.rotate(lean);
+    ctx.fillStyle = 'rgba(4,6,10,0.92)';
+    ctx.beginPath();
+    ctx.ellipse(0, -46, 16, 20, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-16, -40);
+    ctx.quadraticCurveTo(-22, -8, -26, 0);
+    ctx.lineTo(22, 0);
+    ctx.quadraticCurveTo(18, -10, 16, -40);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// 掩埋：土层、落尘、锈色藤蔓
+function bgBurial() {
+  drawSky('burial');
+  // 土层分层
+  for (let i = 0; i < 7; i++) {
+    const y0 = 120 + i * 78;
+    const a = 0.06 + i * 0.02;
+    ctx.fillStyle = `rgba(${90 + i * 8},${68 + i * 6},${40 + i * 4},${a})`;
+    ctx.beginPath();
+    ctx.moveTo(0, y0);
+    for (let x = 0; x <= W; x += 60) {
+      ctx.lineTo(x, y0 + Math.sin((x + cam.x * 0.35) * 0.006 + i) * 14);
+    }
+    ctx.lineTo(W, H);
+    ctx.lineTo(0, H);
+    ctx.closePath();
+    ctx.fill();
+  }
+  // 锈色藤蔓
+  ctx.save();
+  ctx.strokeStyle = 'rgba(90,170,120,0.16)';
+  ctx.lineWidth = 3;
+  for (let k = 0; k < 5; k++) {
+    ctx.beginPath();
+    const baseX = 120 + k * 260 - (cam.x * 0.4 % 260);
+    ctx.moveTo(baseX, H);
+    for (let i = 1; i <= 6; i++) {
+      ctx.lineTo(baseX + Math.sin(i * 1.4 + tGlobal * 0.3 + k) * 26, H - i * 70);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+  // 落尘
+  for (let i = 0; i < 50; i++) {
+    const seed = i * 91.7;
+    const px = ((seed * 5 + tGlobal * 8) % (W + 100)) - 50;
+    const py = (tGlobal * (18 + (i % 4) * 9) + seed * 11) % H;
+    ctx.fillStyle = `rgba(210,180,130,${0.10 + (i % 3) * 0.05})`;
+    ctx.fillRect(px, py, 2, 2);
+  }
+}
+
+// 发掘：探方、黄土剖面、光柱、浮尘
+function bgDig() {
+  drawSky('dig');
+  // 探方格线
+  ctx.save();
+  ctx.strokeStyle = 'rgba(40,30,18,0.35)';
+  ctx.lineWidth = 2;
+  for (let i = -1; i < 8; i++) {
+    const x = i * 200 - (cam.x * 0.6 % 200);
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + 60, H); ctx.stroke();
+  }
+  for (let j = 0; j < 5; j++) {
+    const y = 120 + j * 130;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y + 8); ctx.stroke();
+  }
+  ctx.restore();
+  // 光柱
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < 3; i++) {
+    const x = 240 + i * 420 - (cam.x * 0.3 % 420);
+    const g = ctx.createLinearGradient(x, 0, x + 160, H);
+    g.addColorStop(0, 'rgba(255,240,190,0.14)');
+    g.addColorStop(1, 'rgba(255,240,190,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(x - 40, 0); ctx.lineTo(x + 80, 0);
+    ctx.lineTo(x + 240, H); ctx.lineTo(x + 40, H);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+  // 浮尘
+  for (let i = 0; i < 70; i++) {
+    const seed = i * 61.3;
+    const px = ((seed * 9 + Math.sin(tGlobal * 0.5 + i) * 40 + tGlobal * 5) % W + W) % W;
+    const py = (seed * 13 + tGlobal * (10 + (i % 5) * 4)) % H;
+    ctx.fillStyle = `rgba(255,245,210,${0.15 + (i % 4) * 0.06})`;
+    ctx.fillRect(px, py, 2.2, 2.2);
+  }
+}
+
+// 展柜：暗展厅、射灯、玻璃反光
+function bgMuseum() {
+  drawSky('museum');
+  // 墙面装饰线
+  ctx.strokeStyle = 'rgba(80,90,110,0.15)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 6; i++) {
+    ctx.beginPath();
+    ctx.moveTo(0, i * 120);
+    ctx.lineTo(W, i * 120);
+    ctx.stroke();
+  }
+  // 射灯光锥
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < 4; i++) {
+    const x = 300 + i * 320 - (cam.x * 0.25 % 320);
+    const g = ctx.createLinearGradient(x, 0, x, 620);
+    g.addColorStop(0, 'rgba(255,240,200,0.16)');
+    g.addColorStop(1, 'rgba(255,240,200,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(x - 18, 0);
+    ctx.lineTo(x + 18, 0);
+    ctx.lineTo(x + 130, 620);
+    ctx.lineTo(x - 130, 620);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+  // 玻璃反光条
+  ctx.save();
+  ctx.globalAlpha = 0.06;
+  ctx.fillStyle = '#cfe8ff';
+  for (let i = 0; i < 3; i++) {
+    const x = 120 + i * 460 - (cam.x * 0.5 % 460);
+    ctx.beginPath();
+    ctx.moveTo(x, 0); ctx.lineTo(x + 70, 0); ctx.lineTo(x + 210, H); ctx.lineTo(x + 140, H);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+  // 远处观众剪影
+  for (let i = 0; i < 3; i++) {
+    const px = 420 + i * 380 - (cam.x * 0.8 % 380);
+    const bob = Math.sin(tGlobal * 0.9 + i) * 2;
+    ctx.fillStyle = 'rgba(10,14,20,0.55)';
+    ctx.beginPath();
+    ctx.ellipse(px, 520 + bob, 15, 18, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(px - 17, 528 + bob); ctx.lineTo(px - 22, 620); ctx.lineTo(px + 22, 620);
+    ctx.lineTo(px + 17, 528 + bob); ctx.closePath(); ctx.fill();
+  }
+}
+
+function drawBackground(theme) {
+  if (theme === 'forge') bgForge();
+  else if (theme === 'ritual') bgRitual();
+  else if (theme === 'burial') bgBurial();
+  else if (theme === 'dig') bgDig();
+  else bgMuseum();
+}
+
+/* ================= 平台 ================= */
+function drawPlatforms() {
+  const th = THEME[level.theme];
+  for (const pl of level.plats) {
+    const px = pl[0] - cam.x, py = pl[1], pw = pl[2], ph = pl[3];
+    if (px + pw < -40 || px > W + 40) continue;
+
+    const g = ctx.createLinearGradient(0, py, 0, py + ph);
+    g.addColorStop(0, th.plat[0]);
+    g.addColorStop(0.18, th.plat[1]);
+    g.addColorStop(1, '#08090b');
+    ctx.fillStyle = g;
+    ctx.fillRect(px, py, pw, ph);
+
+    // 顶面高光
+    ctx.fillStyle = 'rgba(255,235,190,0.30)';
+    ctx.fillRect(px, py, pw, 2);
+    ctx.fillStyle = `rgba(${level.theme === 'dig' ? '255,240,200' : '150,220,190'},0.14)`;
+    ctx.fillRect(px, py + 2, pw, 7);
+
+    // 侧面纹理
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = 1;
+    for (let x = 14; x < pw; x += 46) {
+      ctx.beginPath();
+      ctx.moveTo(px + x, py + 10);
+      ctx.lineTo(px + x + 6, py + Math.min(ph, 60));
+      ctx.stroke();
+    }
+    // 土沁分层
+    ctx.strokeStyle = 'rgba(0,0,0,0.20)';
+    for (let y = py + 34; y < py + ph; y += 24) {
+      ctx.beginPath();
+      ctx.moveTo(px, y);
+      ctx.lineTo(px + pw, y);
+      ctx.stroke();
+    }
+    // 云雷纹饰带
+    ctx.strokeStyle = 'rgba(208,178,114,0.20)';
+    ctx.lineWidth = 1.4;
+    for (let x = 10; x < pw - 26; x += 30) {
+      ctx.beginPath();
+      ctx.moveTo(px + x, py + 24);
+      ctx.lineTo(px + x, py + 12);
+      ctx.lineTo(px + x + 13, py + 12);
+      ctx.lineTo(px + x + 13, py + 19);
+      ctx.stroke();
+    }
+  }
+}
+
+/* ================= 青铜锈 / 土沁 质感层 ================= */
+const patinaCv = document.createElement('canvas');
+patinaCv.width = 512; patinaCv.height = 288;
+(function buildPatina() {
+  const c = patinaCv.getContext('2d');
+  let s = 20261024;
+  const rnd = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  // 斑驳锈块
+  for (let i = 0; i < 2200; i++) {
+    const x = rnd() * 512, y = rnd() * 288, r = 2 + rnd() * 12;
+    const t = rnd();
+    c.fillStyle = t < 0.42 ? `rgba(120,190,150,${0.03 + rnd() * 0.06})`
+      : t < 0.72 ? `rgba(200,155,90,${0.02 + rnd() * 0.05})`
+      : t < 0.9 ? `rgba(210,235,215,${0.015 + rnd() * 0.03})`
+      : `rgba(12,22,18,${0.04 + rnd() * 0.07})`;
+    c.beginPath(); c.arc(x, y, r, 0, 6.2832); c.fill();
+  }
+  // 细坑蚀点
+  for (let i = 0; i < 2600; i++) {
+    c.fillStyle = `rgba(8,16,12,${0.05 + rnd() * 0.12})`;
+    c.fillRect(rnd() * 512, rnd() * 288, 1.4, 1.4);
+  }
+})();
+
+function drawPatina() {
+  ctx.save();
+  ctx.globalAlpha = 0.62;
+  ctx.globalCompositeOperation = 'overlay';
+  ctx.drawImage(patinaCv, 0, 0, W, H);
+  ctx.restore();
+}
+
+/* 器物边框：把画面当作一件出土器物来装裱 */
+function drawFrame() {
+  ctx.save();
+  ctx.strokeStyle = 'rgba(198,168,106,0.40)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(14, 14, W - 28, H - 28);
+  ctx.strokeStyle = 'rgba(198,168,106,0.15)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(24, 24, W - 48, H - 48);
+  // 四角云雷纹
+  ctx.strokeStyle = 'rgba(214,184,118,0.52)';
+  ctx.lineWidth = 2.5;
+  const L = 30, o = 22;
+  const corners = [[o, o, 1, 1], [W - o, o, -1, 1], [o, H - o, 1, -1], [W - o, H - o, -1, -1]];
+  for (const c of corners) {
+    const x = c[0], y = c[1], sx = c[2], sy = c[3];
+    ctx.beginPath();
+    ctx.moveTo(x + sx * L, y); ctx.lineTo(x, y); ctx.lineTo(x, y + sy * L);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x + sx * L * 0.55, y + sy * 8);
+    ctx.lineTo(x + sx * 8, y + sy * 8);
+    ctx.lineTo(x + sx * 8, y + sy * L * 0.55);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/* 文物影像淡层：以叠加光的形式融入场景，而非贴图水印 */
+function drawArtifactGhost(alpha, dh, wx) {
+  if (!posterReady) return;
+  const dw = dh * (CROP.sw / CROP.sh);
+  const x = wx - cam.x * 0.22;
+  if (x + dw < -80 || x - dw > W + 80) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(poster, CROP.sx, CROP.sy, CROP.sw, CROP.sh, x - dw / 2, H * 0.54 - dh / 2, dw, dh);
+  ctx.restore();
+}
+
+/* ================= 火焰 / 锈刺 造型 ================= */
+// 把点列连成平滑闭合轮廓（避免锯齿）
+function smoothClosed(pts) {
+  const n = pts.length;
+  const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const m0 = mid(pts[n - 1], pts[0]);
+  ctx.beginPath();
+  ctx.moveTo(m0[0], m0[1]);
+  for (let i = 0; i < n; i++) {
+    const cur = pts[i], nxt = pts[(i + 1) % n];
+    const m = mid(cur, nxt);
+    ctx.quadraticCurveTo(cur[0], cur[1], m[0], m[1]);
+  }
+  ctx.closePath();
+  ctx.fill();
+}
+
+// 生成火焰轮廓：左右两条带湍流的曲线 + 顶端参差火舌
+function buildFlame(cx, gy, h, w, tips, ph, spd, turb) {
+  const pts = [];
+  const N = 6, CAP = 0.86;
+  for (let i = 0; i <= N; i++) {           // 左缘自下而上
+    const p = i / N * CAP;
+    const halfW = w * 0.5 * Math.pow(1 - p, 0.72);
+    const t = Math.sin(tGlobal * spd + ph + p * 5.0) * turb * w * 0.26 * (0.3 + p);
+    pts.push([cx + t - halfW, gy - h * p]);
+  }
+  const topY = gy - h * CAP;
+  for (let k = 0; k < tips; k++) {          // 顶端独立火舌
+    const q = (k + 0.5) / tips;
+    const x = cx + (q - 0.5) * w * 0.66;
+    const tipH = h * (0.10 + 0.30 * (0.5 + 0.5 * Math.sin(tGlobal * spd * 1.45 + ph + k * 2.3)));
+    const lean = Math.sin(tGlobal * spd * 1.15 + ph + k * 1.9) * w * 0.18;
+    pts.push([x + lean, topY - tipH]);
+    if (k < tips - 1) {
+      const nx = cx + ((k + 1) / tips - 0.5) * w * 0.66;
+      pts.push([(x + nx) / 2, topY + h * 0.09]);
+    }
+  }
+  for (let i = N; i >= 0; i--) {            // 右缘自上而下
+    const p = i / N * CAP;
+    const halfW = w * 0.5 * Math.pow(1 - p, 0.72);
+    const t = Math.sin(tGlobal * spd * 1.23 + ph + 2.1 + p * 4.6) * turb * w * 0.26 * (0.3 + p);
+    pts.push([cx + t + halfW, gy - h * p]);
+  }
+  return pts;
+}
+
+// 四层叠加的焰体：暗红轮廓 → 橙 → 金黄 → 白核
+function drawFlame(cx, gy, hgt, w) {
+  const layers = [
+    { sw: 1.00, ww: 1.00, ph: 0.0, spd: 5.2, tips: 3, turb: 1.0, f: 'rgba(148,30,10,0.42)' },
+    { sw: 0.78, ww: 0.80, ph: 1.9, spd: 7.1, tips: 4, turb: 0.85, f: 'rgba(255,110,30,0.55)' },
+    { sw: 0.53, ww: 0.56, ph: 3.6, spd: 9.4, tips: 4, turb: 0.65, f: 'rgba(255,182,72,0.60)' },
+    { sw: 0.29, ww: 0.32, ph: 5.2, spd: 12.3, tips: 3, turb: 0.45, f: 'rgba(255,246,206,0.72)' }
+  ];
+  for (let i = 0; i < layers.length; i++) {
+    const L = layers[i];
+    ctx.globalCompositeOperation = i === 0 ? 'source-over' : 'lighter';
+    ctx.fillStyle = L.f;
+    smoothClosed(buildFlame(cx, gy, hgt * L.sw, w * L.ww, L.tips, L.ph, L.spd, L.turb));
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+/* ================= 危险物绘制 ================= */
+function drawHazards() {
+  for (const h of haz) {
+    if (h.t === 'laser') {
+      const cx = (h.cur === undefined ? h.x0 : h.cur) - cam.x;
+      // 光柱
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const g = ctx.createLinearGradient(cx - h.w, 0, cx + h.w, 0);
+      g.addColorStop(0, 'rgba(255,235,180,0)');
+      g.addColorStop(0.5, 'rgba(255,235,180,0.30)');
+      g.addColorStop(1, 'rgba(255,235,180,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(cx - h.w, h.y, h.w * 2, h.hgt);
+      ctx.restore();
+      ctx.fillStyle = 'rgba(255,246,210,0.55)';
+      ctx.fillRect(cx - h.w * 0.34, h.y, h.w * 0.68, h.hgt);
+      // 地面光斑
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      radialGlow(cx, h.y + h.hgt, 90, 'rgba(255,235,170,0.16)');
+      ctx.restore();
+      continue;
+    }
+
+    if (h.t === 'rock') {
+      const cx = h.x - cam.x, cy = h.cx === undefined ? h.yTop : h.cx;
+      if (h.warning) {
+        // 预警：地面闪烁圈 + 落点虚线
+        const f = 0.35 + 0.65 * Math.abs(Math.sin(tGlobal * 12));
+        ctx.strokeStyle = `rgba(255,120,60,${f})`;
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([8, 7]);
+        ctx.beginPath();
+        ctx.moveTo(cx, cy + h.size * 0.4);
+        ctx.lineTo(cx, h.gy);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.ellipse(cx, h.gy - 4, h.size * 0.62, 11, 0, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(255,120,60,${f * 0.9})`;
+        ctx.stroke();
+      }
+      // 土块
+      ctx.save();
+      ctx.fillStyle = h.firing ? '#6b5638' : 'rgba(70,56,38,0.85)';
+      ctx.beginPath();
+      ctx.moveTo(cx - h.size / 2, cy);
+      ctx.lineTo(cx - h.size * 0.3, cy - h.size * 0.55);
+      ctx.lineTo(cx + h.size * 0.34, cy - h.size * 0.5);
+      ctx.lineTo(cx + h.size / 2, cy + h.size * 0.1);
+      ctx.lineTo(cx + h.size * 0.16, cy + h.size * 0.5);
+      ctx.lineTo(cx - h.size * 0.36, cy + h.size * 0.44);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(20,14,8,0.6)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.restore();
+      continue;
+    }
+
+    // fire / rust：地面喷口/锈刺
+    const cx = h.x - cam.x;
+    if (cx < -160 || cx > W + 160) continue;
+    const gy = h.gy;
+    const isFire = h.t === 'fire';
+
+    // 喷口底座
+    ctx.fillStyle = isFire ? '#241610' : '#2a2418';
+    ctx.beginPath();
+    ctx.moveTo(cx - h.w * 0.7, gy);
+    ctx.lineTo(cx - h.w * 0.42, gy - 16);
+    ctx.lineTo(cx + h.w * 0.42, gy - 16);
+    ctx.lineTo(cx + h.w * 0.7, gy);
+    ctx.closePath();
+    ctx.fill();
+
+    if (h.cur > 8) {
+      const top = gy - h.cur;
+      ctx.save();
+      if (isFire) {
+        const pool = 0.55 + 0.45 * Math.sin(tGlobal * 7.1 + (h.ph || 0));
+        // 地面光池：随焰高脉动
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.translate(cx, gy);
+        ctx.scale(1, 0.30);
+        const pg = ctx.createRadialGradient(0, 0, 0, 0, 0, h.w * 5.2);
+        pg.addColorStop(0, `rgba(255,138,48,${0.30 * pool})`);
+        pg.addColorStop(0.45, `rgba(255,108,28,${0.13 * pool})`);
+        pg.addColorStop(1, 'rgba(255,100,30,0)');
+        ctx.fillStyle = pg;
+        ctx.beginPath();
+        ctx.arc(0, 0, h.w * 5.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+        // 多层焰体
+        drawFlame(cx, gy, h.cur, h.w * 1.08);
+        // 亮核 + 余烬
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        radialGlow(cx, gy - 6, h.w * 1.4, `rgba(255,226,160,${0.26 * pool})`);
+        for (let i = 0; i < 24; i++) {
+          const sp = 0.45 + (i % 5) * 0.19;
+          const p = ((tGlobal * sp + i * 0.137) % 1);
+          const ex = cx + Math.sin(i * 2.7 + tGlobal * 2.2) * h.w * (0.45 + p * 1.25);
+          const ey = gy - h.cur * p * 1.12 - 6;
+          ctx.fillStyle = `rgba(255,${165 + (i % 5) * 16},92,${(1 - p) * 0.8})`;
+          const s = 2.8 - p * 1.5;
+          ctx.fillRect(ex, ey, s, s);
+        }
+        ctx.restore();
+      } else {
+        // 三簇绿锈尖刺
+        radialGlow(cx, (gy + top) / 2, h.cur * 0.85, 'rgba(90,190,140,0.15)');
+        const spikes = [
+          { dx: -h.w * 0.36, dh: 0.60, ph: 0 },
+          { dx: h.w * 0.30, dh: 0.78, ph: 2.1 },
+          { dx: h.w * 0.02, dh: 1.00, ph: 4.2 }
+        ];
+        for (const s of spikes) {
+          const sh = h.cur * s.dh;
+          const sw = h.w * (0.30 + s.dh * 0.15);
+          const rg = ctx.createLinearGradient(0, gy - sh, 0, gy);
+          rg.addColorStop(0, '#a8dcc0');
+          rg.addColorStop(0.30, '#4a8f72');
+          rg.addColorStop(0.70, '#2a5c48');
+          rg.addColorStop(1, '#14302a');
+          ctx.fillStyle = rg;
+          const bend = Math.sin(tGlobal * 3 + s.ph) * sw * 0.35;
+          smoothClosed([
+            [cx + s.dx - sw, gy],
+            [cx + s.dx - sw * 0.5, gy - sh * 0.5],
+            [cx + s.dx + bend, gy - sh],
+            [cx + s.dx + sw * 0.5, gy - sh * 0.5],
+            [cx + s.dx + sw, gy],
+            [cx + s.dx + sw * 0.4, gy + 5],
+            [cx + s.dx - sw * 0.4, gy + 5]
+          ]);
+          // 暗描边 + 棱线高光，做出青铜的硬度
+          ctx.strokeStyle = 'rgba(6,18,14,0.8)';
+          ctx.lineWidth = 2.4;
+          ctx.stroke();
+          ctx.strokeStyle = 'rgba(190,245,215,0.30)';
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.moveTo(cx + s.dx - sw * 0.15, gy);
+          ctx.lineTo(cx + s.dx + bend * 0.8 - sw * 0.1, gy - sh * 0.92);
+          ctx.stroke();
+        }
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.fillStyle = 'rgba(150,225,185,0.5)';
+        for (let i = 0; i < 10; i++) {
+          const p = ((tGlobal * 0.7 + i * 0.1) % 1);
+          ctx.fillRect(cx + Math.sin(i * 2.1 + tGlobal * 2.4) * h.w * 0.7, gy - h.cur - p * 60, 2, 2);
+        }
+        ctx.restore();
+      }
+      ctx.restore();
+    } else if (h.warning) {
+      // 预警：喷口闪烁 + 地面预警线
+      const f = 0.3 + 0.7 * Math.abs(Math.sin(tGlobal * 11));
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      radialGlow(cx, gy - 30, 90, `rgba(255,110,50,${0.12 + f * 0.14})`);
+      ctx.restore();
+      ctx.strokeStyle = `rgba(255,105,45,${f})`;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(cx - h.w * 0.6, gy - 18);
+      ctx.lineTo(cx + h.w * 0.6, gy - 18);
+      ctx.stroke();
+    }
+  }
+}
+
+/* ================= 逐段旁白字幕 ================= */
+function drawSubtitle() {
+  if (!sub) return;
+  const k = Math.min(1, sub.life / 0.5) * Math.min(1, (sub.max - sub.life) / 0.35);
+  if (k <= 0.01) return;
+  ctx.save();
+  ctx.globalAlpha = k;
+  ctx.font = '20px "Microsoft YaHei", serif';
+  ctx.textAlign = 'center';
+  const tw = ctx.measureText(sub.text).width;
+  const bx = W / 2, by = H - 104;
+  const g = ctx.createLinearGradient(bx - tw / 2 - 40, 0, bx + tw / 2 + 40, 0);
+  g.addColorStop(0, 'rgba(4,9,8,0)');
+  g.addColorStop(0.5, 'rgba(4,9,8,0.72)');
+  g.addColorStop(1, 'rgba(4,9,8,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(bx - tw / 2 - 40, by - 26, tw + 80, 40);
+  ctx.fillStyle = '#f0e0b4';
+  ctx.shadowColor = 'rgba(0,0,0,0.9)';
+  ctx.shadowBlur = 8;
+  ctx.fillText(sub.text, bx, by);
+  ctx.restore();
+  ctx.textAlign = 'left';
+}
+
+/* ================= 暗角 ================= */
+function drawVignette() {
+  const g = ctx.createRadialGradient(W / 2, H / 2, H * 0.30, W / 2, H / 2, H * 1.05);
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(0.7, 'rgba(0,0,0,0.18)');
+  g.addColorStop(1, 'rgba(0,0,0,0.58)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+}
+
+/* ================= 光尘 ================= */
+function drawMotes() {
+  for (const m of motes) {
+    if (m.taken) continue;
+    const x = m.x - cam.x, y = m.y + Math.sin(tGlobal * 2.2 + m.x) * 6;
+    if (x < -40 || x > W + 40) continue;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    radialGlow(x, y, 46, 'rgba(255,215,120,0.28)');
+    radialGlow(x, y, 16, 'rgba(255,245,200,0.55)');
+    ctx.restore();
+    ctx.fillStyle = '#fff3c4';
+    ctx.beginPath();
+    ctx.arc(x, y, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,225,150,0.7)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(x, y, 11 + Math.sin(tGlobal * 3 + m.y) * 2, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  // 收集爆散粒子
+  for (const b of burst) {
+    if (b.life <= 0) continue;
+    ctx.fillStyle = `rgba(255,230,160,${b.life / b.max})`;
+    ctx.fillRect(b.x - cam.x, b.y, 3, 3);
+  }
+}
+
+/* ================= 终点 ================= */
+function drawGoal() {
+  const gx = level.goal.x - cam.x, gy = level.goal.y;
+  if (gx < -160 || gx > W + 160) return;
+  const open = collected >= level.motes.length;
+  const pulse = 0.6 + 0.4 * Math.sin(tGlobal * 3);
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  radialGlow(gx, gy - 110, open ? 190 : 110, open
+    ? `rgba(255,225,150,${0.22 + pulse * 0.12})`
+    : 'rgba(120,150,140,0.10)');
+  ctx.restore();
+
+  // 祭坛台基
+  ctx.fillStyle = '#1a1a1c';
+  ctx.fillRect(gx - 48, gy - 22, 96, 22);
+  ctx.fillStyle = 'rgba(220,190,130,0.55)';
+  ctx.fillRect(gx - 48, gy - 22, 96, 2);
+
+  // 门框（石/铜）
+  ctx.fillStyle = '#2a2a2a';
+  ctx.fillRect(gx - 34, gy - 150, 8, 128);
+  ctx.fillRect(gx + 26, gy - 150, 8, 128);
+  ctx.fillRect(gx - 34, gy - 158, 68, 9);
+
+  // 门内光
+  const gg = ctx.createLinearGradient(0, gy - 150, 0, gy - 24);
+  gg.addColorStop(0, open ? `rgba(255,235,170,${0.20 + pulse * 0.14})` : 'rgba(40,50,45,0.35)');
+  gg.addColorStop(1, open ? 'rgba(255,190,90,0.03)' : 'rgba(20,26,24,0.15)');
+  ctx.fillStyle = gg;
+  ctx.fillRect(gx - 26, gy - 150, 52, 126);
+
+  if (!open) {
+    ctx.fillStyle = 'rgba(230,220,190,0.55)';
+    ctx.font = '13px "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('还差 ' + (level.motes.length - collected) + ' 缕光尘', gx, gy - 176);
+  } else {
+    // 门内头像剪影
+    ctx.save();
+    ctx.globalAlpha = 0.35 + pulse * 0.2;
+    drawHead(gx, gy - 86, 15, { flat: true });
+    ctx.restore();
+  }
+}
+
+/* ================= 青铜祭司头像（主角） ================= */
+function drawHead(x, y, r, opt) {
+  opt = opt || {};
+  const ang = opt.angle || 0;
+  const sxx = opt.sx === undefined ? 1 : opt.sx;
+  const syy = opt.sy === undefined ? 1 : opt.sy;
+  const blink = opt.blink || 0;
+  const flat = !!opt.flat;
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(ang);
+  ctx.scale(sxx, syy);
+
+  const patina = ['#3f8068', '#4f9a7c', '#2c5d4e'];
+  const bronze = '#7a5f3a';
+
+  /* --- 尖锥颈 --- */
+  const ng = ctx.createLinearGradient(-r * 0.6, 0, r * 0.6, 0);
+  ng.addColorStop(0, patina[2]);
+  ng.addColorStop(0.45, patina[1]);
+  ng.addColorStop(1, patina[0]);
+  ctx.fillStyle = ng;
+  ctx.beginPath();
+  ctx.moveTo(-r * 0.42, r * 0.72);
+  ctx.lineTo(r * 0.42, r * 0.72);
+  ctx.lineTo(r * 0.18, r * 1.62);
+  ctx.lineTo(-r * 0.18, r * 1.62);
+  ctx.closePath();
+  ctx.fill();
+
+  /* --- 外张双耳（内缘深入面部，由后绘的面庞覆盖，保证连体） --- */
+  for (const side of [-1, 1]) {
+    ctx.save();
+    ctx.translate(side * r * 0.44, -r * 0.08);
+    ctx.rotate(side * 0.30);
+    const eg = ctx.createLinearGradient(0, -r * 0.4, side * r * 0.6, r * 0.3);
+    eg.addColorStop(0, patina[1]);
+    eg.addColorStop(0.6, patina[0]);
+    eg.addColorStop(1, patina[2]);
+    ctx.fillStyle = eg;
+    ctx.beginPath();
+    ctx.moveTo(side * r * 0.10, -r * 0.50);
+    ctx.lineTo(side * r * 0.60, -r * 0.62);
+    ctx.lineTo(side * r * 0.74, r * 0.10);
+    ctx.lineTo(side * r * 0.12, r * 0.30);
+    ctx.closePath();
+    ctx.fill();
+    // 耳廓内线
+    ctx.strokeStyle = 'rgba(12,32,26,0.5)';
+    ctx.lineWidth = Math.max(1, r * 0.055);
+    ctx.beginPath();
+    ctx.moveTo(side * r * 0.24, -r * 0.32);
+    ctx.lineTo(side * r * 0.54, -r * 0.40);
+    ctx.lineTo(side * r * 0.60, r * 0.04);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /* --- 面庞 --- */
+  const fg = ctx.createRadialGradient(-r * 0.25, -r * 0.35, r * 0.15, 0, 0, r * 1.15);
+  fg.addColorStop(0, '#6fb897');
+  fg.addColorStop(0.45, patina[1]);
+  fg.addColorStop(0.8, patina[0]);
+  fg.addColorStop(1, patina[2]);
+  ctx.fillStyle = fg;
+  ctx.beginPath();
+  ctx.moveTo(-r * 0.62, -r * 0.74);
+  ctx.lineTo(r * 0.62, -r * 0.74);
+  ctx.quadraticCurveTo(r * 0.82, r * 0.05, r * 0.44, r * 0.72);
+  ctx.lineTo(-r * 0.44, r * 0.72);
+  ctx.quadraticCurveTo(-r * 0.82, r * 0.05, -r * 0.62, -r * 0.74);
+  ctx.closePath();
+  ctx.fill();
+
+  /* --- 圆筒头冠 --- */
+  const cw = r * 0.72;
+  const cTop = -r * 1.72, cBot = -r * 0.70;
+  const cg = ctx.createLinearGradient(-cw, 0, cw, 0);
+  cg.addColorStop(0, '#25503f');
+  cg.addColorStop(0.32, '#5a9d80');
+  cg.addColorStop(0.62, '#427d68');
+  cg.addColorStop(1, '#1e4034');
+  ctx.fillStyle = cg;
+  ctx.fillRect(-cw, cTop, cw * 2, cBot - cTop);
+  // 顶面
+  ctx.beginPath();
+  ctx.ellipse(0, cTop, cw, r * 0.19, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#3c7460';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(0, cTop, cw * 0.42, r * 0.08, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#0c1a15';
+  ctx.fill();
+  // 冠下沿
+  ctx.fillStyle = 'rgba(8,20,16,0.45)';
+  ctx.fillRect(-cw, cBot - r * 0.06, cw * 2, r * 0.06);
+
+  if (!flat) {
+    /* --- 铜锈斑 --- */
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.62, -r * 0.74);
+    ctx.lineTo(r * 0.62, -r * 0.74);
+    ctx.quadraticCurveTo(r * 0.82, r * 0.05, r * 0.44, r * 0.72);
+    ctx.lineTo(-r * 0.44, r * 0.72);
+    ctx.quadraticCurveTo(-r * 0.82, r * 0.05, -r * 0.62, -r * 0.74);
+    ctx.closePath();
+    ctx.clip();
+    ctx.fillStyle = bronze;
+    ctx.globalAlpha = 0.22;
+    ctx.beginPath();
+    ctx.ellipse(r * 0.34, -r * 0.12, r * 0.22, r * 0.3, 0.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(-r * 0.40, r * 0.34, r * 0.18, r * 0.16, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 0.30;
+    ctx.fillStyle = '#9fd8b8';
+    ctx.beginPath();
+    ctx.ellipse(-r * 0.18, -r * 0.42, r * 0.24, r * 0.14, 0.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    /* --- 粗重眉骨 --- */
+    ctx.fillStyle = 'rgba(16,38,30,0.85)';
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.58, -r * 0.42);
+    ctx.lineTo(-r * 0.10, -r * 0.24);
+    ctx.lineTo(-r * 0.10, -r * 0.14);
+    ctx.lineTo(-r * 0.58, -r * 0.26);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(r * 0.58, -r * 0.42);
+    ctx.lineTo(r * 0.10, -r * 0.24);
+    ctx.lineTo(r * 0.10, -r * 0.14);
+    ctx.lineTo(r * 0.58, -r * 0.26);
+    ctx.closePath();
+    ctx.fill();
+
+    /* --- 杏眼（带刻线眼睑） --- */
+    const eyeOpen = 1 - blink;
+    for (const side of [-1, 1]) {
+      const ex = side * r * 0.32, ey = -r * 0.04;
+      const ew = r * 0.24, eh = r * 0.14 * eyeOpen;
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(ex - ew, ey);
+      ctx.quadraticCurveTo(ex, ey - eh * 1.7, ex + ew, ey);
+      ctx.quadraticCurveTo(ex, ey + eh * 1.1, ex - ew, ey);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(10,26,22,0.82)';
+      ctx.fill();
+      // 眼睑刻线
+      ctx.strokeStyle = 'rgba(150,215,185,0.55)';
+      ctx.lineWidth = Math.max(1, r * 0.045);
+      ctx.beginPath();
+      ctx.moveTo(ex - ew, ey);
+      ctx.quadraticCurveTo(ex, ey - eh * 1.7, ex + ew, ey);
+      ctx.stroke();
+      if (eyeOpen > 0.3) {
+        ctx.fillStyle = 'rgba(225,240,205,0.85)';
+        ctx.beginPath();
+        ctx.ellipse(ex, ey - r * 0.02, ew * 0.42, eh * 0.75, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#173228';
+        ctx.beginPath();
+        ctx.arc(ex + (opt.gaze || 0) * r * 0.08, ey - r * 0.02, r * 0.075, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    /* --- 宽鼻 --- */
+    ctx.fillStyle = 'rgba(20,48,38,0.55)';
+    ctx.beginPath();
+    ctx.moveTo(0, r * 0.02);
+    ctx.lineTo(-r * 0.17, r * 0.34);
+    ctx.lineTo(r * 0.17, r * 0.34);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = 'rgba(150,210,180,0.30)';
+    ctx.fillRect(-r * 0.03, r * 0.06, r * 0.06, r * 0.24);
+
+    /* --- 薄唇紧闭 --- */
+    ctx.strokeStyle = 'rgba(14,34,28,0.85)';
+    ctx.lineWidth = Math.max(1, r * 0.07);
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.20, r * 0.50);
+    ctx.quadraticCurveTo(0, r * 0.54, r * 0.20, r * 0.50);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+/* ================= 主角绘制 ================= */
+function drawPlayer() {
+  const px = player.x - cam.x;
+  const py = player.y;
+
+  // 落地阴影
+  let floorY = py + 240;
+  for (const pl of level.plats) {
+    if (player.x > pl[0] - 10 && player.x < pl[0] + pl[2] + 10 && pl[1] >= py + player.r - 6) {
+      if (pl[1] < floorY) floorY = pl[1];
+    }
+  }
+  const dist = floorY - (py + player.r);
+  const k = clamp(1 - dist / 300, 0.16, 0.5);
+  ctx.save();
+  ctx.globalAlpha = k;
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.ellipse(px, floorY + 2, player.r * 1.05 * k, player.r * 0.26 * k, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // 青铜头像本体
+  const tilt = clamp(player.vx / SPEED, -1, 1) * 0.11;
+  const bob = player.grounded && Math.abs(player.vx) > 40
+    ? Math.sin(tGlobal * 12) * 0.02 : 0;
+  const blink = Math.sin(tGlobal * 1.1) > 0.972 ? 1 : 0;
+
+  ctx.save();
+  ctx.globalAlpha = player.inv > 0 ? 0.55 : 1;
+  drawHead(px, py, player.r, {
+    angle: tilt,
+    sx: player.sx,
+    sy: player.sy + bob,
+    blink: blink,
+    gaze: player.face,
+    flat: false
+  });
+  ctx.restore();
+
+  // 微弱轮廓光
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  radialGlow(px, py - player.r * 0.2, player.r * 2.4, 'rgba(120,220,180,0.05)');
+  ctx.restore();
+}
+
+/* ================= HUD ================= */
+function drawHUD() {
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(235,225,195,0.92)';
+  ctx.font = '600 22px "Microsoft YaHei", sans-serif';
+  ctx.fillText(level.name, 40, 52);
+
+  ctx.font = '13px "Microsoft YaHei", sans-serif';
+  ctx.fillStyle = 'rgba(180,215,200,0.55)';
+  ctx.fillText('键盘：← → / A D 移动 · 空格 跳跃 · R 重来 · Esc 退出', 40, 76);
+  ctx.fillStyle = pad.connected ? 'rgba(150,235,190,0.75)' : 'rgba(255,190,120,0.80)';
+  ctx.fillText(pad.connected
+    ? '手柄：已连接 · 左摇杆/十字键 移动 · A 跳跃 · B 退出'
+    : (!pageActivated && HAS_GAMEPAD_API && !IN_IFRAME
+        ? '手柄：待激活 — 先点一下画面或按一下键盘，再按手柄任意键'
+        : '手柄：未检测到（按一下手柄任意键唤醒；USB 需先在系统里识别）'), 40, 96);
+  // 手柄实时诊断（便于确认按键编号）
+  if (pad.connected) {
+    ctx.font = '11px Consolas, monospace';
+    ctx.fillStyle = 'rgba(140,225,185,0.45)';
+    ctx.fillText('pad: ' + String(pad.name).slice(0, 44), 40, H - 30);
+    ctx.fillText('axes[' + pad.axes + ']  按下键[' + (pad.dbg || '无') + ']  ' +
+                 '左' + (pad.left ? 1 : 0) + ' 右' + (pad.right ? 1 : 0) + ' 跳' + (pad.jump ? 1 : 0),
+                 40, H - 14);
+  } else if (IN_IFRAME || !HAS_GAMEPAD_API) {
+    ctx.font = '600 12px "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = 'rgba(255,170,90,0.85)';
+    ctx.fillText(IN_IFRAME
+      ? '⚠ 预览窗中运行：浏览器屏蔽了手柄。请双击本 HTML 用独立窗口打开。'
+      : '⚠ 浏览器不支持 Gamepad API，手柄不可用。', 40, H - 14);
+  }
+  ctx.font = '13px "Microsoft YaHei", sans-serif';
+
+  // 光尘计数
+  ctx.fillStyle = 'rgba(255,230,160,0.9)';
+  ctx.font = '600 15px "Microsoft YaHei", sans-serif';
+  ctx.fillText('光尘 ' + collected + ' / ' + level.motes.length, 40, 132);
+  for (let i = 0; i < level.motes.length; i++) {
+    ctx.beginPath();
+    ctx.arc(146 + i * 18, 127, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = i < collected ? '#ffe9a8' : 'rgba(255,255,255,0.16)';
+    ctx.fill();
+  }
+
+  // 生命
+  ctx.font = '600 15px "Microsoft YaHei", sans-serif';
+  ctx.fillStyle = 'rgba(235,205,150,0.9)';
+  ctx.fillText('生命', 268, 132);
+  for (let i = 0; i < MAXHP; i++) {
+    const hx = 318 + i * 24, hy = 127;
+    ctx.beginPath();
+    ctx.arc(hx, hy, 8, 0, Math.PI * 2);
+    if (i < player.hp) {
+      ctx.fillStyle = '#4f9a7c';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(200,240,215,0.85)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(230,255,240,0.9)';
+      ctx.beginPath();
+      ctx.arc(hx - 2.4, hy - 2.4, 2, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
+  // 进度
+  const pct = clamp(player.x / level.goal.x, 0, 1);
+  ctx.fillStyle = 'rgba(255,255,255,0.10)';
+  ctx.fillRect(40, 150, 380, 3);
+  ctx.fillStyle = 'rgba(255,225,150,0.75)';
+  ctx.fillRect(40, 150, 380 * pct, 3);
+}
+
+/* ---- 退出按钮 ---- */
+function drawExit() {
+  const b = BTN_EXIT;
+  const hov = inExit(mouse);
+  ctx.save();
+  ctx.fillStyle = hov ? 'rgba(255,225,150,0.20)' : 'rgba(10,18,16,0.55)';
+  ctx.fillRect(b.x, b.y, b.w, b.h);
+  ctx.strokeStyle = hov ? 'rgba(255,225,150,0.9)' : 'rgba(190,215,205,0.38)';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(b.x + 0.5, b.y + 0.5, b.w - 1, b.h - 1);
+  ctx.fillStyle = hov ? '#ffeec0' : 'rgba(215,232,224,0.8)';
+  ctx.font = '15px "Microsoft YaHei", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('退出 (Esc)', b.x + b.w / 2, b.y + 25);
+  ctx.restore();
+  ctx.textAlign = 'left';
+}
+
+/* ================= 文字换行 ================= */
+function wrapText(text, x, y, maxW, lineH, color, font) {
+  ctx.font = font;
+  ctx.fillStyle = color;
+  ctx.textAlign = 'left';
+  let line = '', yy = y;
+  for (const ch of text) {
+    const test = line + ch;
+    if (ctx.measureText(test).width > maxW && line) {
+      ctx.fillText(line, x, yy);
+      line = ch;
+      yy += lineH;
+    } else {
+      line = test;
+    }
+  }
+  if (line) ctx.fillText(line, x, yy);
+}
+
+/* ================= 标题 ================= */
+function drawTitle() {
+  const bg = ctx.createRadialGradient(W / 2, 360, 80, W / 2, 360, 720);
+  bg.addColorStop(0, '#10261f');
+  bg.addColorStop(1, '#050a08');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // 铜锈纹理点缀
+  for (let i = 0; i < 30; i++) {
+    const x = (i * 317) % W, y = (i * 197) % H;
+    ctx.fillStyle = `rgba(90,180,140,${0.02 + (i % 3) * 0.012})`;
+    ctx.beginPath();
+    ctx.arc(x, y, 30 + (i % 4) * 22, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e8d4a0';
+  ctx.font = '700 62px "Microsoft YaHei", serif';
+  ctx.fillText('一眼三千年', W / 2, 96);
+  ctx.fillStyle = 'rgba(200,225,210,0.7)';
+  ctx.font = '17px "Microsoft YaHei", sans-serif';
+  ctx.fillText('三星堆祭司青铜头像 · 铸造 → 受祭 → 掩埋 → 发掘 → 展出', W / 2, 134);
+
+  // 文物本体
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  radialGlow(W / 2, 400, 260, 'rgba(255,210,120,0.10)');
+  ctx.restore();
+  if (!drawArtifact(W / 2, 400, 420, 0.96)) {
+    ctx.fillStyle = 'rgba(200,225,210,0.4)';
+    ctx.font = '16px "Microsoft YaHei", sans-serif';
+    ctx.fillText('（文物配图未加载）', W / 2, 400);
+  }
+
+  // 题眼
+  ctx.fillStyle = 'rgba(235,220,175,0.85)';
+  ctx.font = '18px "Microsoft YaHei", serif';
+  ctx.fillText('“三千年前的一张脸，只为看你一眼。”', W / 2, 590);
+
+  // 开始
+  ctx.fillStyle = `rgba(255,240,190,${0.55 + 0.45 * Math.sin(tGlobal * 3)})`;
+  ctx.font = '600 21px "Microsoft YaHei", sans-serif';
+  ctx.fillText('按 空格 / Enter / 手柄 Start 开始', W / 2, 650);
+
+  ctx.fillStyle = 'rgba(150,180,170,0.45)';
+  ctx.font = '13px "Microsoft YaHei", sans-serif';
+  ctx.fillText('键盘：← → / A D 移动 · 空格 跳跃 · R 重来 · Esc 退出', W / 2, 684);
+  ctx.fillText('手柄：左摇杆 / 十字键 移动 · A 跳跃 · Start 开始 · B 退出', W / 2, 704);
+
+  // 预览窗 / iframe 环境：Gamepad API 会被浏览器屏蔽，给出明确指引
+  if (IN_IFRAME || !HAS_GAMEPAD_API) {
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(30,14,8,0.92)';
+    ctx.fillRect(BTN_OPEN.x - 24, BTN_OPEN.y - 58, BTN_OPEN.w + 48, 118);
+    ctx.strokeStyle = 'rgba(255,170,90,0.75)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(BTN_OPEN.x - 24, BTN_OPEN.y - 58, BTN_OPEN.w + 48, 118);
+
+    ctx.font = '600 15px "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = 'rgba(255,180,100,0.95)';
+    ctx.textAlign = 'center';
+    ctx.fillText(IN_IFRAME ? '当前在预览窗中运行，手柄会被浏览器屏蔽' : '当前浏览器不支持 Gamepad API',
+                 W / 2, BTN_OPEN.y - 32);
+    ctx.font = '13px "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = 'rgba(255,215,175,0.75)';
+    ctx.fillText('请用独立浏览器窗口打开本 HTML 文件（双击即可）', W / 2, BTN_OPEN.y - 10);
+
+    const hov = inOpen(mouse);
+    ctx.fillStyle = hov ? 'rgba(255,225,150,0.90)' : 'rgba(255,200,120,0.72)';
+    ctx.fillRect(BTN_OPEN.x, BTN_OPEN.y, BTN_OPEN.w, BTN_OPEN.h);
+    ctx.fillStyle = '#20140a';
+    ctx.font = '600 16px "Microsoft YaHei", sans-serif';
+    ctx.fillText('点击在独立窗口打开', W / 2, BTN_OPEN.y + 29);
+  }
+  ctx.textAlign = 'center';
+}
+
+/* ================= 关卡过场 ================= */
+function drawIntro() {
+  ctx.fillStyle = 'rgba(4,9,8,0.92)';
+  ctx.fillRect(0, 0, W, H);
+
+  const th = THEME[level.theme];
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  radialGlow(300, 360, 300, level.theme === 'forge' ? 'rgba(255,140,60,0.16)'
+    : level.theme === 'ritual' ? 'rgba(255,180,90,0.14)'
+    : level.theme === 'burial' ? 'rgba(140,190,120,0.10)'
+    : level.theme === 'dig' ? 'rgba(255,225,160,0.12)'
+    : 'rgba(200,220,255,0.10)');
+  ctx.restore();
+
+  // 文物图
+  if (!drawArtifact(300, 360, 400, 0.9)) {
+    ctx.fillStyle = 'rgba(200,225,210,0.3)';
+    ctx.textAlign = 'center';
+    ctx.font = '15px "Microsoft YaHei", sans-serif';
+    ctx.fillText('文物配图', 300, 360);
+  }
+
+  // 竖线分隔
+  ctx.strokeStyle = 'rgba(210,190,140,0.25)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(560, 200);
+  ctx.lineTo(560, 540);
+  ctx.stroke();
+
+  // 关卡序号
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#d8bd7d';
+  ctx.font = '15px "Microsoft YaHei", sans-serif';
+  ctx.fillText('第 ' + (levelIdx + 1) + ' / ' + LEVELS.length + ' 关', 610, 232);
+
+  ctx.fillStyle = '#f0e2bb';
+  ctx.font = '700 44px "Microsoft YaHei", serif';
+  ctx.fillText(level.name, 606, 288);
+
+  wrapText(level.line, 610, 350, 560, 36, 'rgba(215,230,220,0.82)', '19px "Microsoft YaHei", sans-serif');
+
+  // 目标
+  ctx.fillStyle = 'rgba(255,225,150,0.85)';
+  ctx.font = '15px "Microsoft YaHei", sans-serif';
+  ctx.fillText('目标：拾起 ' + level.motes.length + ' 缕光尘，走到终点', 610, 470);
+
+  ctx.fillStyle = `rgba(255,240,190,${0.5 + 0.5 * Math.sin(tGlobal * 3)})`;
+  ctx.font = '600 17px "Microsoft YaHei", sans-serif';
+  ctx.fillText('按 空格 / 手柄 A 继续', 610, 530);
+
+  // 底部文化依据
+  ctx.fillStyle = 'rgba(130,160,150,0.40)';
+  ctx.font = '12px "Microsoft YaHei", sans-serif';
+  ctx.fillText('商代（前1600—前1046）· 1986 年广汉三星堆二号祭祀坑出土 · 三星堆博物馆藏', 610, 640);
+}
+
+/* ================= 通关 ================= */
+function drawClear() {
+  ctx.fillStyle = 'rgba(4,9,8,0.86)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#f4e4b8';
+  ctx.font = '700 46px "Microsoft YaHei", serif';
+  ctx.fillText('第 ' + (levelIdx + 1) + ' 关 · 通过', W / 2, 300);
+  ctx.fillStyle = 'rgba(200,230,215,0.8)';
+  ctx.font = '18px "Microsoft YaHei", sans-serif';
+  ctx.fillText(level.line, W / 2, 356);
+  ctx.fillStyle = `rgba(255,240,190,${0.5 + 0.5 * Math.sin(tGlobal * 3)})`;
+  ctx.font = '600 19px "Microsoft YaHei", sans-serif';
+  ctx.fillText(levelIdx < LEVELS.length - 1 ? '按 空格 进入下一关' : '按 空格 走向结局', W / 2, 430);
+}
+
+/* ================= 结局 ================= */
+function drawEnding() {
+  const bg = ctx.createRadialGradient(W / 2, 340, 60, W / 2, 340, 700);
+  bg.addColorStop(0, '#0d211b');
+  bg.addColorStop(1, '#040807');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  radialGlow(W / 2, 300, 240, 'rgba(255,215,130,0.13)');
+  ctx.restore();
+  drawArtifact(W / 2, 290, 340, 0.95);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#efdba6';
+  ctx.font = '700 50px "Microsoft YaHei", serif';
+  ctx.fillText('它先是一团火', W / 2, 520);
+
+  ctx.fillStyle = 'rgba(225,205,160,0.85)';
+  ctx.font = '19px "Microsoft YaHei", serif';
+  ctx.fillText('三千年前的一张脸，只为看你一眼。', W / 2, 562);
+
+  ctx.fillStyle = 'rgba(150,180,170,0.55)';
+  ctx.font = '12px "Microsoft YaHei", sans-serif';
+  ctx.fillText('文化依据：商代（前1600—前1046）；1986 年四川广汉三星堆二号祭祀坑出土；三星堆博物馆藏。', W / 2, 618);
+  ctx.fillText('艺术想象声明：铸造、祭祀、掩埋等情节为艺术演绎，非考古复原；造型依据馆方展签与展览海报二次创作。', W / 2, 638);
+
+  ctx.fillStyle = `rgba(255,240,190,${0.5 + 0.5 * Math.sin(tGlobal * 3)})`;
+  ctx.font = '600 17px "Microsoft YaHei", sans-serif';
+  ctx.fillText('按 空格 重新开始', W / 2, 684);
+}
+
+/* ================= 渲染 ================= */
+function render() {
+  if (state === 'title') { drawTitle(); drawPatina(); drawVignette(); drawFrame(); return; }
+  if (state === 'ending') { drawEnding(); drawPatina(); drawVignette(); drawFrame(); return; }
+
+  ctx.save();
+  if (shakeT > 0) {
+    const m = shakeT * 26;
+    ctx.translate((Math.random() - 0.5) * m, (Math.random() - 0.5) * m);
+  }
+
+  drawBackground(level.theme);
+  drawArtifactGhost(0.075, H * 1.55, level.width * 0.16);
+  drawArtifactGhost(0.055, H * 1.15, level.width * 0.60);
+  drawPlatforms();
+  drawHazards();
+  drawGoal();
+  drawMotes();
+  drawPlayer();
+  ctx.restore();
+
+  drawPatina();
+  drawVignette();
+  drawFrame();
+
+  if (hurtFlash > 0) {
+    ctx.fillStyle = `rgba(190,40,30,${Math.min(0.5, hurtFlash * 0.55)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  drawHUD();
+  drawSubtitle();
+
+  if (state === 'intro') drawIntro();
+  if (state === 'clear') drawClear();
+  drawExit();
+}
+
+/* ================= 主循环 ================= */
+let last = performance.now();
+let acc = 0;
+
+function frame(now) {
+  const raw = (now - last) / 1000;
+  last = now;
+  const dt = Math.min(raw, 0.05);
+  tGlobal += dt;
+  stateT += dt;
+
+  gatherInput();
+
+  if (state !== 'title' && (pressed.has('Escape') || pad.backEdge)) toTitle();
+
+  if (state === 'title') {
+    if (input.startEdge) { loadLevel(0); state = 'intro'; stateT = 0; }
+  } else if (state === 'intro') {
+    // 不再要求 stateT 阈值：过场刚出现的瞬间按键也会被接受，避免"按了没反应"
+    if (input.startEdge) { state = 'play'; stateT = 0; acc = 0; }
+  } else if (state === 'play') {
+    if (pressed.has('KeyR')) respawn();
+    acc += dt;
+    let guard = 0;
+    while (acc >= STEP && guard++ < 10 && state === 'play') { step(STEP); acc -= STEP; }
+    if (state !== 'play') acc = 0;
+    // 粒子更新
+    for (const b of burst) {
+      b.life -= dt;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      b.vy += 420 * dt;
+    }
+  } else if (state === 'clear') {
+    if (input.startEdge) {
+      if (levelIdx < LEVELS.length - 1) {
+        loadLevel(levelIdx + 1); state = 'intro'; stateT = 0;
+      } else {
+        state = 'ending'; stateT = 0;
+      }
+    }
+  } else if (state === 'ending') {
+    if (input.startEdge && stateT > 0.3) { state = 'title'; stateT = 0; }
+  }
+
+  pressed.clear();
+  render();
+  requestAnimationFrame(frame);
+}
+
+loadLevel(0);
+state = 'title';
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
