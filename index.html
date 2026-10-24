@@ -80,6 +80,7 @@ addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
 
 /* ---- 鼠标 / 触控：坐标换算与退出按钮 ---- */
 const BTN_EXIT = { x: W - 146, y: 26, w: 110, h: 38 };
+const BTN_SOUND = { x: W - 276, y: 26, w: 118, h: 38 };
 const mouse = { x: -999, y: -999 };
 function toCanvas(e) {
   const r = cv.getBoundingClientRect();
@@ -89,7 +90,11 @@ function inExit(p) {
   return p.x > BTN_EXIT.x && p.x < BTN_EXIT.x + BTN_EXIT.w &&
          p.y > BTN_EXIT.y && p.y < BTN_EXIT.y + BTN_EXIT.h;
 }
-function toTitle() { state = 'title'; stateT = 0; }
+function inSound(p) {
+  return p.x > BTN_SOUND.x && p.x < BTN_SOUND.x + BTN_SOUND.w &&
+         p.y > BTN_SOUND.y && p.y < BTN_SOUND.y + BTN_SOUND.h;
+}
+function toTitle() { state = 'title'; stateT = 0; sfxBack(); }
 cv.addEventListener('pointermove', e => { const p = toCanvas(e); mouse.x = p.x; mouse.y = p.y; });
 const BTN_OPEN = { x: W / 2 - 110, y: 470, w: 220, h: 44 };
 function inOpen(p) { return p.x > BTN_OPEN.x && p.x < BTN_OPEN.x + BTN_OPEN.w &&
@@ -98,6 +103,7 @@ cv.addEventListener('pointerdown', e => {
   const p = toCanvas(e);
   mouse.x = p.x; mouse.y = p.y;
   resumeAudio();
+  if (inSound(p)) { toggleMute(); return; }
   if (inExit(p)) { toTitle(); return; }
   if (IN_IFRAME && state === 'title' && inOpen(p)) { window.open(location.href, '_blank'); return; }
   clickEdge = true;
@@ -105,51 +111,62 @@ cv.addEventListener('pointerdown', e => {
 
 const pad = { left: false, right: false, jump: false, jumpEdge: false, startEdge: false,
               backEdge: false, connected: false, name: '', count: 0, dbg: '', axes: '' };
-let padStartPrev = false, padJumpPrev = false, padBackPrev = false;
+let padBackPrev = false, padAxisPrev = false;
+let padIdxPrev = new Set();   // 上一帧按下的按键编号，用于逐键判定"新按下"
 
 function pollPad() {
   let list = [];
-  try { list = navigator.getGamepads ? navigator.getGamepads() : []; } catch (e) { list = []; }
+  try {
+    if (navigator.getGamepads) list = navigator.getGamepads();
+    else if (navigator.webkitGetGamepads) list = navigator.webkitGetGamepads();
+  } catch (e) { list = []; }
   let gp = null, n = 0;
-  for (const g of list) { if (g && g.connected) { n++; if (!gp) gp = g; } }
+  for (let i = 0; i < list.length; i++) {
+    const g = list[i];
+    if (g && g.connected) { n++; if (!gp) gp = g; }
+  }
   pad.count = n;
   pad.jumpEdge = false;
   pad.startEdge = false;
   pad.backEdge = false;
+  pad.anyInput = false;
   if (!gp) {
     pad.left = pad.right = pad.jump = false;
     pad.connected = false;
     pad.dbg = '';
+    pad.axes = '';
+    padIdxPrev.clear();
     return;
   }
   pad.connected = true;
   pad.name = gp.id || '';
-  const ax = gp.axes[0] || 0;
   const b = i => !!(gp.buttons[i] && gp.buttons[i].pressed);
   const pressedIdx = [];
   for (let i = 0; i < gp.buttons.length; i++) if (b(i)) pressedIdx.push(i);
   pad.dbg = pressedIdx.join(',');
   pad.axes = Array.prototype.map.call(gp.axes, v => v.toFixed(2)).join(' ');
 
-  // 左摇杆（部分非标准手柄把左摇杆放在 axes[2]）
-  const ax0 = gp.axes.length > 0 ? gp.axes[0] : 0;
-  const axH = (gp.axes.length > 2 && Math.abs(ax0) < 0.2 && Math.abs(gp.axes[2]) > 0.5 &&
-               Math.abs(gp.axes[2]) < 1.01) ? gp.axes[2] : ax0;
-  // 十字键：标准映射走按钮 14/15；非标准手柄常把 POV 帽放在 axes[9]（值 -1 / 0 / 1）
+  // 左摇杆：标准布局 axes[0] 横轴；十字键走按钮 14/15，非标准 POV 帽在 axes[9]
+  const a0 = gp.axes[0] || 0;
   const hat = gp.axes.length > 9 ? gp.axes[9] : 0;
-  pad.left = axH < -0.30 || b(14) || hat < -0.5;
-  pad.right = axH > 0.30 || b(15) || hat > 0.5;
-  // 跳跃：A(0)；兼容部分手柄映射到 X(2)/Y(3)
-  const j = b(0) || b(2) || b(3);
-  if (j && !padJumpPrev) pad.jumpEdge = true;
-  padJumpPrev = j;
-  pad.jump = j;
-  // 开始 / 继续
-  const s = b(9);
-  if (s && !padStartPrev) pad.startEdge = true;
-  padStartPrev = s;
-  // 退出：B(1) 或 Back(8)
-  const k = b(1) || b(8);
+  pad.left  = a0 < -0.28 || b(14) || hat < -0.5;
+  pad.right = a0 >  0.28 || b(15) || hat >  0.5;
+  pad.hx = a0;
+
+  // 任意键 = 跳跃 / 确认：用逐键"新按下"边沿判定。
+  // 不同手柄把 A/B/X/Y 报到不同编号，这样无论哪个键都能起跳、都能在标题页开始，
+  // 且长按不会每帧重复触发。
+  let newIdx = -1;
+  for (const i of pressedIdx) if (!padIdxPrev.has(i)) { newIdx = i; break; }
+  padIdxPrev = new Set(pressedIdx);
+  if (newIdx >= 0) { pad.jumpEdge = true; pad.startEdge = true; }
+  pad.jumpIdx = newIdx;
+  pad.jump = pressedIdx.length > 0;
+  if (pressedIdx.length) { pad.lastIdx = pressedIdx[0]; pad.lastT = tGlobal; pad.anyInput = true; }
+  if (Math.abs(a0) > 0.55) pad.anyInput = true;
+
+  // 退出：只认 Back / Select(8)。刻意不占用 B(1)——部分手柄把确认键映射到 1，占用会导致确认键失效
+  const k = b(8);
   if (k && !padBackPrev) pad.backEdge = true;
   padBackPrev = k;
   if (pad.name === undefined) pad.name = '';
@@ -176,24 +193,596 @@ function gatherInput() {
 }
 
 /* ================= 音效（WebAudio 合成） ================= */
-let audioCtx = null;
+let audioCtx = null, masterGain = null, ambientOn = false, audioStarted = false;
+let audioMuted = false;
+let ambState = 'title';          // 'title' | 'game'：两种紧张度
+let ambGraph = null;             // 常驻节点（drone / heartbeat / shimmer）
+
+// 用户首次交互时立即启动音频上下文与双层氛围音
 function resumeAudio() {
   if (!audioCtx) {
     try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audioCtx = null; }
+    if (audioCtx) {
+      // 主总线加一个软限幅压缩器：多声音同时触发时不会削顶爆音
+      const comp = audioCtx.createDynamicsCompressor();
+      comp.threshold.value = -14;
+      comp.knee.value = 18;
+      comp.ratio.value = 6;
+      comp.attack.value = 0.004;
+      comp.release.value = 0.20;
+      masterGain = audioCtx.createGain();
+      masterGain.gain.value = 1.05;
+      masterGain.connect(comp);
+      comp.connect(audioCtx.destination);
+    }
   }
   if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  if (audioCtx && !ambientOn) startAmbient();
+  if (audioCtx) audioStarted = true;
+  // 首次交互后直接进入"游戏中"紧张度——用户既然点了说明准备开玩
+  if (audioCtx && ambState === 'title') setAmbState('game');
 }
-function tone(freq, dur, type, vol) {
-  if (!audioCtx) return;
+
+// 静音开关：主声道直接切到 0，节点保留，恢复时无缝
+function toggleMute() {
+  if (!audioCtx || !masterGain) return;
+  audioMuted = !audioMuted;
+  masterGain.gain.cancelScheduledValues(audioCtx.currentTime);
+  masterGain.gain.linearRampToValueAtTime(audioMuted ? 0 : 1.05, audioCtx.currentTime + 0.15);
+}
+
+// 基础音：可选 sweepTo 做频率滑音
+function tone(freq, dur, type, vol, sweepTo) {
+  if (!audioCtx || !masterGain) return;
   const o = audioCtx.createOscillator(), g = audioCtx.createGain();
   o.type = type || 'sine';
   o.frequency.value = freq;
-  g.gain.value = 0;
   const now = audioCtx.currentTime;
-  g.gain.linearRampToValueAtTime(vol || 0.12, now + 0.02);
+  if (sweepTo) o.frequency.exponentialRampToValueAtTime(Math.max(20, sweepTo), now + dur);
+  g.gain.value = 0;
+  g.gain.linearRampToValueAtTime(vol || 0.12, now + 0.015);
   g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-  o.connect(g); g.connect(audioCtx.destination);
+  o.connect(g); g.connect(masterGain);
   o.start(now); o.stop(now + dur + 0.05);
+}
+
+// 带通噪声：落地闷响 / 受击 / 冲击，比纯正弦更有"实体感"
+function noise(dur, vol, freq, q) {
+  if (!audioCtx || !masterGain) return;
+  const n = Math.max(1, Math.floor(audioCtx.sampleRate * dur));
+  const buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  const bp = audioCtx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.value = freq || 420;
+  bp.Q.value = q || 1.2;
+  const g = audioCtx.createGain();
+  g.gain.value = vol || 0.18;
+  src.connect(bp); bp.connect(g); g.connect(masterGain);
+  src.start();
+}
+
+/* ---- 具体音效（音量整体拉高，配合主总线压缩器防爆音） ---- */
+function sfxJump()  { if (!audioMuted) tone(300, 0.16, 'square', 0.28, 640); }
+function sfxLand()  { if (!audioMuted) { noise(0.14, 0.38, 230, 0.9); tone(95, 0.12, 'sine', 0.24); } }
+function sfxCoin()  { if (audioMuted) return; tone(880, 0.10, 'sine', 0.32); setTimeout(() => tone(1320, 0.20, 'sine', 0.28), 60); }
+function sfxHit()   { if (!audioMuted) { noise(0.22, 0.52, 300, 1.0); tone(150, 0.28, 'sawtooth', 0.28, 70); } }
+function sfxDeath() { if (audioMuted) return; tone(420, 0.60, 'triangle', 0.36, 90); setTimeout(() => noise(0.55, 0.40, 180, 0.8), 80); }
+function sfxClear() { if (audioMuted) return; [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => tone(f, 0.46, 'sine', 0.30), i * 105)); }
+function sfxStart() { if (audioMuted) return; tone(392, 0.32, 'triangle', 0.28); setTimeout(() => tone(587, 0.46, 'sine', 0.26), 110); }
+function sfxBack()  { if (!audioMuted) tone(320, 0.24, 'triangle', 0.22, 170); }
+
+// 心跳"咚—嘭"：两声低频短促轰鸣，危险度越高越响
+function sfxHeartbeat(vol) {
+  if (!audioCtx || !masterGain) return;
+  const v = vol || 0.42;
+  const now = audioCtx.currentTime;
+  // 咚：80Hz 短促
+  const o1 = audioCtx.createOscillator(), g1 = audioCtx.createGain();
+  o1.type = 'sine';
+  o1.frequency.setValueAtTime(95, now);
+  o1.frequency.exponentialRampToValueAtTime(52, now + 0.10);
+  g1.gain.value = 0;
+  g1.gain.linearRampToValueAtTime(v, now + 0.008);
+  g1.gain.exponentialRampToValueAtTime(0.0001, now + 0.14);
+  const lp1 = audioCtx.createBiquadFilter();
+  lp1.type = 'lowpass'; lp1.frequency.value = 320;
+  o1.connect(lp1); lp1.connect(g1); g1.connect(masterGain);
+  o1.start(now); o1.stop(now + 0.18);
+  // 嘭：稍晚稍低的补音
+  setTimeout(() => {
+    if (!audioCtx || !masterGain) return;
+    const t2 = audioCtx.currentTime;
+    const o2 = audioCtx.createOscillator(), g2 = audioCtx.createGain();
+    o2.type = 'sine';
+    o2.frequency.setValueAtTime(78, t2);
+    o2.frequency.exponentialRampToValueAtTime(40, t2 + 0.11);
+    g2.gain.value = 0;
+    g2.gain.linearRampToValueAtTime(v * 0.68, t2 + 0.008);
+    g2.gain.exponentialRampToValueAtTime(0.0001, t2 + 0.16);
+    const lp2 = audioCtx.createBiquadFilter();
+    lp2.type = 'lowpass'; lp2.frequency.value = 280;
+    o2.connect(lp2); lp2.connect(g2); g2.connect(masterGain);
+    o2.start(t2); o2.stop(t2 + 0.20);
+  }, 160);
+}
+
+// 危险预警"嘶——"：带通噪声扫频，玩家靠近危险物时短促提示
+function sfxWarn() {
+  if (!audioCtx || !masterGain || audioMuted) return;
+  const now = audioCtx.currentTime;
+  const dur = 0.28;
+  const n = Math.max(1, Math.floor(audioCtx.sampleRate * dur));
+  const buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+  const src = audioCtx.createBufferSource(); src.buffer = buf;
+  const bp = audioCtx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.setValueAtTime(700, now);
+  bp.frequency.exponentialRampToValueAtTime(1400, now + dur);
+  bp.Q.value = 3.5;
+  const g = audioCtx.createGain();
+  g.gain.value = 0;
+  g.gain.linearRampToValueAtTime(0.28, now + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+  src.connect(bp); bp.connect(g); g.connect(masterGain);
+  src.start(now); src.stop(now + dur + 0.02);
+}
+
+// 收集光尘时的"铃"声（比 sfxCoin 更冷更克制，符合青铜氛围）
+function sfxMote() {
+  if (!audioCtx || !masterGain || audioMuted) return;
+  tone(1174, 0.10, 'sine', 0.22);
+  setTimeout(() => tone(1568, 0.16, 'sine', 0.18), 55);
+}
+
+// 夯土块撞地闷响：低频冲击 + 短促噪声散射
+function sfxRockImpact() {
+  if (!audioCtx || !masterGain || audioMuted) return;
+  const now = audioCtx.currentTime;
+  // 主冲击：80Hz 正弦波快速衰减
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(120, now);
+  o.frequency.exponentialRampToValueAtTime(38, now + 0.28);
+  g.gain.setValueAtTime(0.0001, now);
+  g.gain.exponentialRampToValueAtTime(0.55, now + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, now + 0.42);
+  o.connect(g).connect(masterGain);
+  o.start(now); o.stop(now + 0.5);
+  // 散射噪声：模拟碎土落地
+  const n = Math.max(1, Math.floor(audioCtx.sampleRate * 0.24));
+  const buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n) * (1 - i / n);
+  const src = audioCtx.createBufferSource(); src.buffer = buf;
+  const lp = audioCtx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(700, now);
+  lp.frequency.exponentialRampToValueAtTime(180, now + 0.24);
+  const ng = audioCtx.createGain();
+  ng.gain.setValueAtTime(0.35, now);
+  ng.gain.exponentialRampToValueAtTime(0.0001, now + 0.24);
+  src.connect(lp).connect(ng).connect(masterGain);
+  src.start(now); src.stop(now + 0.3);
+}
+
+// 土块颤动加剧时的闷闷"嘎"（先兆音，短促）
+function sfxRockWarn() {
+  if (!audioCtx || !masterGain || audioMuted) return;
+  const now = audioCtx.currentTime;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'triangle';
+  o.frequency.setValueAtTime(140, now);
+  o.frequency.linearRampToValueAtTime(90, now + 0.16);
+  g.gain.setValueAtTime(0.0001, now);
+  g.gain.exponentialRampToValueAtTime(0.18, now + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+  o.connect(g).connect(masterGain);
+  o.start(now); o.stop(now + 0.22);
+}
+
+/* ================= 紧张氛围音（双层：drone + 心跳 + 危险脉冲） ================= */
+// 标题页：低频持续、心跳缓慢（60bpm）、无危险脉冲
+// 游戏中：心跳稍快（80bpm）、drone 更响、危险脉冲按 danger 强度调制
+function setAmbState(s) {
+  ambState = s;
+  if (!ambGraph || !audioCtx) return;
+  const t = audioCtx.currentTime;
+  const isGame = (s === 'game');
+  // 音量分配：让主旋律和打击乐真的听得见——之前 musicG 只开到 0.22，被 drone 完全压住
+  ambGraph.droneG.gain.cancelScheduledValues(t);
+  ambGraph.droneG.gain.linearRampToValueAtTime(isGame ? 0.18 : 0.10, t + 1.6);
+  ambGraph.shimmerG.gain.cancelScheduledValues(t);
+  ambGraph.shimmerG.gain.linearRampToValueAtTime(isGame ? 0.10 : 0.05, t + 1.6);
+  // 紧张背景音乐：标题页降到极低音量（不静音，保持连续感），游戏中全开
+  if (ambGraph.musicG) {
+    ambGraph.musicG.gain.cancelScheduledValues(t);
+    ambGraph.musicG.gain.linearRampToValueAtTime(isGame ? 0.62 : 0.14, t + 1.2);
+  }
+  if (ambGraph.percG) {
+    ambGraph.percG.gain.cancelScheduledValues(t);
+    ambGraph.percG.gain.linearRampToValueAtTime(isGame ? 0.80 : 0.12, t + 1.2);
+  }
+  ambGraph.beatOn = isGame;
+  ambGraph.beatBPM = isGame ? 84 : 58;
+}
+
+// 危险度：0..1，由外部按"最近危险物距离 + 玩家血量"实时推送
+function setAmbDanger(v) {
+  if (!ambGraph) return;
+  ambGraph.dangerTarget = Math.max(0, Math.min(1, v));
+}
+
+function startAmbient() {
+  if (!audioCtx || !masterGain) return;
+  ambientOn = true;
+
+  // ---- 主 drone：低音埙 / 洞箫持续声底，缓慢起伏，营造"历史深处"的呼吸 ----
+  const droneG = audioCtx.createGain();
+  droneG.gain.value = 0.0001;
+  droneG.gain.linearRampToValueAtTime(0.14, audioCtx.currentTime + 3.5);
+  const droneLP = audioCtx.createBiquadFilter();
+  droneLP.type = 'lowpass';
+  droneLP.frequency.value = 320;
+  droneLP.Q.value = 0.6;
+  droneLP.connect(droneG); droneG.connect(masterGain);
+  // 低音宫调：C2(65.41) + 微低五度 G1(49) + E2(82.41) + A2(110) —— 中国传统宫调骨架
+  [[49.0, 'sine', 0.55], [65.41, 'sine', 0.60], [82.41, 'sine', 0.28],
+   [98.0, 'triangle', 0.14], [110.0, 'sine', 0.10]].forEach(([f, type, w]) => {
+    const o = audioCtx.createOscillator();
+    o.type = type;
+    o.frequency.value = f * (1 + (Math.random() - 0.5) * 0.004);
+    const og = audioCtx.createGain();
+    og.gain.value = w;
+    // 缓慢 LFO 调音——让 drone 每 20~30 秒轻微漂移，避免机械感
+    const lfo = audioCtx.createOscillator();
+    lfo.frequency.value = 0.04 + Math.random() * 0.05;
+    const lfoG = audioCtx.createGain();
+    lfoG.gain.value = f * 0.006;
+    lfo.connect(lfoG); lfoG.connect(o.frequency);
+    lfo.start();
+    o.connect(og); og.connect(droneLP); o.start();
+  });
+
+  // ---- shimmer：远处飘散的钟磬余音（编钟/铜磬泛音，长余音自然衰减） ----
+  const shimmerG = audioCtx.createGain();
+  shimmerG.gain.value = 0.0001;
+  shimmerG.gain.linearRampToValueAtTime(0.06, audioCtx.currentTime + 4.0);
+  const shH = audioCtx.createBiquadFilter();
+  shH.type = 'bandpass';
+  shH.frequency.value = 1400;
+  shH.Q.value = 0.8;
+  shH.connect(shimmerG); shimmerG.connect(masterGain);
+  // 编钟泛音组（C-E-G-A + 高八度），五声宫调，慢速随机触发
+  const GONG_NOTES = [523.25, 587.33, 659.25, 783.99, 880.00, 1046.50, 1174.66];
+  setInterval(() => {
+    if (!audioCtx || audioCtx.state !== 'running' || audioMuted) return;
+    const f = GONG_NOTES[Math.floor(Math.random() * GONG_NOTES.length)] * (1 + (Math.random() - 0.5) * 0.005);
+    const t0 = audioCtx.currentTime;
+    // 主音：sine，长余音（4 秒）
+    const o1 = audioCtx.createOscillator(), g1 = audioCtx.createGain();
+    o1.type = 'sine'; o1.frequency.value = f;
+    g1.gain.value = 0;
+    g1.gain.linearRampToValueAtTime(0.10, t0 + 0.04);
+    g1.gain.exponentialRampToValueAtTime(0.0001, t0 + 4.5);
+    o1.connect(g1); g1.connect(shH);
+    o1.start(t0); o1.stop(t0 + 4.7);
+    // 泛音 2f：金属感，衰减更快
+    const o2 = audioCtx.createOscillator(), g2 = audioCtx.createGain();
+    o2.type = 'sine'; o2.frequency.value = f * 2.76; // 铜磬典型 2.76 倍泛音
+    g2.gain.value = 0;
+    g2.gain.linearRampToValueAtTime(0.04, t0 + 0.02);
+    g2.gain.exponentialRampToValueAtTime(0.0001, t0 + 1.8);
+    o2.connect(g2); g2.connect(shH);
+    o2.start(t0); o2.stop(t0 + 2.0);
+  }, 6500);
+
+  // ---- 历史背景音乐：五声宫调（C-D-E-G-A），洞箫 lead + 深沉大鼓 + 编钟泛音 ----
+  // 中国传统宫调：无 F、B，天然庄严古朴
+  const SCALE = [130.81, 146.83, 164.81, 196.00, 220.00];      // C4 D4 E4 G4 A4
+  const SCALE_HI = [261.63, 293.66, 329.63, 392.00, 440.00];   // C5 D5 E5 G5 A5
+  const SCALE_LO = [65.41, 73.42, 82.41, 98.00, 110.00];       // C3 D3 E3 G3 A3（低音）
+  // 16 步低音线：宫-宫-宫-宫 - 徵-徵-徵-徵 - 商-商-商-商 - 宫-宫-宫-宫（四段各 4 步）
+  const BASS_SEQ = [0, 0, 0, 0,  3, 3, 3, 3,  1, 1, 1, 1,  0, 0, 4, 0];
+  // Lead 动机（五声宫调上行/下行）：宫-徵-宫-徵-羽-徵-宫-徵（"宫徵"骨干 + 羽做装饰）
+  const LEAD_SEQ = [0, 3, 0, 3,  4, 3, 0, 3];
+
+  // 音乐（旋律/贝斯）+ 打击乐（鼓/钟）双总线
+  const musicG = audioCtx.createGain();
+  musicG.gain.value = 0.0001;
+  musicG.gain.linearRampToValueAtTime(0.55, audioCtx.currentTime + 2.5);
+  // 音乐总线加一个暖色低通，避免高频刺耳
+  const musicLP = audioCtx.createBiquadFilter();
+  musicLP.type = 'lowpass'; musicLP.frequency.value = 3800; musicLP.Q.value = 0.4;
+  musicG.connect(musicLP); musicLP.connect(masterGain);
+
+  const percG = audioCtx.createGain();
+  percG.gain.value = 0.0001;
+  percG.gain.linearRampToValueAtTime(0.60, audioCtx.currentTime + 2.5);
+  const percLP = audioCtx.createBiquadFilter();
+  percLP.type = 'lowpass'; percLP.frequency.value = 2200;
+  percG.connect(percLP); percLP.connect(masterGain);
+
+  ambGraph = {
+    droneG, shimmerG, musicG, percG,
+    beatOn: false, beatBPM: 58,
+    dangerTarget: 0, dangerCur: 0,
+    musicOn: false,
+    musicBPM: 66,            // 缓慢推进，历史苍凉感
+    step: 0,
+    nextStepAt: audioCtx.currentTime + 1.0,
+    SCALE, SCALE_HI, SCALE_LO, BASS_SEQ, LEAD_SEQ
+  };
+
+  // 打击乐 helper：白噪声爆发（snare/hi-hat/cymbal 共用）
+  function noiseBurst(t, dur, type, freq, q, vol) {
+    const n = Math.max(1, Math.floor(audioCtx.sampleRate * dur));
+    const buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, 2);
+    const src = audioCtx.createBufferSource(); src.buffer = buf;
+    const f = audioCtx.createBiquadFilter();
+    f.type = type; f.frequency.value = freq; if (q) f.Q.value = q;
+    const g = audioCtx.createGain();
+    g.gain.value = 0;
+    g.gain.linearRampToValueAtTime(vol, t + 0.003);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(f); f.connect(g); g.connect(ambGraph.percG);
+    src.start(t); src.stop(t + dur);
+  }
+  // 大鼓 taiko：深沉轰鸣 + 木皮膜震动（用于历史节奏感）
+  function kickDrum(t, vol, decay = 0.55) {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(90, t);
+    o.frequency.exponentialRampToValueAtTime(36, t + 0.18);
+    g.gain.value = 0;
+    g.gain.linearRampToValueAtTime(vol, t + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+    o.connect(g); g.connect(ambGraph.percG);
+    o.start(t); o.stop(t + decay + 0.05);
+    // 木皮膜 click 头（很轻）
+    noiseBurst(t, 0.04, 'lowpass', 900, 2.0, vol * 0.25);
+  }
+  // 木鱼（用于节奏点缀，替代 snare）
+  function woodFish(t, vol) {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(820, t);
+    o.frequency.exponentialRampToValueAtTime(520, t + 0.05);
+    g.gain.value = 0;
+    g.gain.linearRampToValueAtTime(vol, t + 0.002);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+    o.connect(g); g.connect(ambGraph.percG);
+    o.start(t); o.stop(t + 0.16);
+  }
+  // 编钟 gong：sine 主音 + 2.76 泛音 + 长余音（金属撞击感）
+  function gong(t, freq, vol, decay = 3.2) {
+    // 主音
+    const o1 = audioCtx.createOscillator(), g1 = audioCtx.createGain();
+    o1.type = 'sine'; o1.frequency.value = freq;
+    g1.gain.value = 0;
+    g1.gain.linearRampToValueAtTime(vol, t + 0.012);
+    g1.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+    o1.connect(g1); g1.connect(ambGraph.musicG);
+    o1.start(t); o1.stop(t + decay + 0.1);
+    // 2.76 泛音（铜磬典型）
+    const o2 = audioCtx.createOscillator(), g2 = audioCtx.createGain();
+    o2.type = 'sine'; o2.frequency.value = freq * 2.76;
+    g2.gain.value = 0;
+    g2.gain.linearRampToValueAtTime(vol * 0.35, t + 0.008);
+    g2.gain.exponentialRampToValueAtTime(0.0001, t + decay * 0.55);
+    o2.connect(g2); g2.connect(ambGraph.musicG);
+    o2.start(t); o2.stop(t + decay * 0.6);
+    // 高频金属敲击
+    noiseBurst(t, 0.03, 'highpass', 6500, null, vol * 0.22);
+  }
+  // 钹 cymbal：金属噪声（保留，用于危险度高时的加强）
+  function cymbal(t, vol, dur = 0.85) {
+    noiseBurst(t, dur, 'highpass', 6800, null, vol);
+    noiseBurst(t, dur * 0.4, 'bandpass', 9500, 2.0, vol * 0.55);
+  }
+
+  // 调度器：25ms 步，提前 0.12s 排下一个音符
+  function scheduleMusic() {
+    if (!ambGraph) return;
+    const LOOKAHEAD = 0.12;
+    while (ambGraph.nextStepAt < audioCtx.currentTime + LOOKAHEAD) {
+      // 游戏中基础紧张度 0.30，标题页降到 0.10
+      const inGame = (ambGraph.beatOn === true);
+      const baseDanger = inGame ? 0.22 : 0.08;
+      const danger = Math.max(baseDanger, ambGraph.dangerCur);
+      // BPM：66 → 88（缓慢推进，历史苍凉感）
+      const bpm = 66 + danger * 22;
+      const stepDur = 60 / bpm / 4;
+      const t = ambGraph.nextStepAt;
+      const step = ambGraph.step;
+      const beat = step % 4;
+      const bar = step >> 2;
+
+      // 音量：音乐总线 + 打击学总线
+      const mVol = 0.10 + danger * 0.14;   // 0.10 → 0.24
+      const pVol = 0.14 + danger * 0.22;   // 0.14 → 0.36
+
+      // ---- 打击乐：大鼓 + 木鱼，缓慢庄严节奏 ----
+      if (step % 16 === 0) {
+        // 每小节起手：重低音大鼓
+        kickDrum(t, pVol * 1.6, 0.75);
+        // 编钟：每 12 小节一次（低危险度 0.22 时约 15 秒一次），做"钟点式"仪式
+        // 危险度上升时缩到 8 小节，但仍是稀疏重击
+        const gongEvery = danger > 0.5 ? 8 : 12;
+        if (bar % gongEvery === 0) {
+          // 编钟音用宫调主音（C），危险高时改用低音区（C 下移八度），更沉重
+          const gongFreq = danger > 0.7 ? 130.81 : 261.63;
+          gong(t, gongFreq, mVol * 0.75, 5.0);
+        }
+        if (bar % 4 === 0) {
+          // 每 4 小节一次钹，营造节奏起伏
+          cymbal(t, pVol * 0.35, 1.0);
+        }
+      }
+      if (step % 16 === 8) {
+        // 第 9 步：反拍低音鼓（更轻，做"呼吸"）
+        kickDrum(t, pVol * 0.75, 0.55);
+      }
+      // 木鱼节奏错落：只在小节内 4、14 步打（不对称），打破"4/12 整齐节拍"
+      if (step % 16 === 4 || step % 16 === 14) {
+        woodFish(t, pVol * 0.55);
+      }
+      // 危险度过半：木鱼加密到 10 步（做紧迫），保持单一音点
+      if (danger > 0.6 && step % 16 === 10) {
+        woodFish(t, pVol * 0.45);
+      }
+      if (danger > 0.8 && step % 16 === 14) {
+        // 危险度极高：末拍砸钹 + 大鼓
+        cymbal(t, pVol * 0.6, 0.7);
+        kickDrum(t, pVol * 1.1, 0.45);
+      }
+
+      // ---- 低音线：缓慢深沉低音（宫调低音区）----
+      {
+        const idx = ambGraph.BASS_SEQ[step % ambGraph.BASS_SEQ.length];
+        // 只在小节起始和反拍打低音，避免密集
+        if (step % 4 === 0 || (danger > 0.4 && step % 4 === 2)) {
+          const f = ambGraph.SCALE_LO[idx];
+          const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+          o.type = 'sine';
+          o.frequency.setValueAtTime(f, t);
+          // 低音低通滤波，得到沉闷而硬的贝斯
+          const lp = audioCtx.createBiquadFilter();
+          lp.type = 'lowpass'; lp.frequency.value = 480; lp.Q.value = 0.6;
+          g.gain.value = 0;
+          g.gain.linearRampToValueAtTime(mVol * 1.4, t + 0.012);
+          g.gain.exponentialRampToValueAtTime(0.0001, t + stepDur * 3.6);
+          o.connect(lp); lp.connect(g); g.connect(ambGraph.musicG);
+          o.start(t); o.stop(t + stepDur * 3.8);
+        }
+      }
+
+      // ---- Lead 主音：洞箫 / 埙质感（缓慢的长音）----
+      if (step % 2 === 0) {
+        const idx = ambGraph.LEAD_SEQ[(step >> 1) % ambGraph.LEAD_SEQ.length];
+        const f = ambGraph.SCALE_HI[idx];
+        // 洞箫音色：sine + 少量 vibrato + 高带宽滤波器
+        const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(f, t);
+        // 轻微 vibrato（气声抖动）
+        const lfo = audioCtx.createOscillator(), lg = audioCtx.createGain();
+        lfo.frequency.value = 4.5;
+        lg.gain.value = f * 0.006;
+        lfo.connect(lg); lg.connect(o.frequency);
+        lfo.start(t); lfo.stop(t + stepDur * 2);
+        const bp = audioCtx.createBiquadFilter();
+        bp.type = 'bandpass'; bp.frequency.value = 2200; bp.Q.value = 0.6;
+        const leadVol = mVol * (0.55 + danger * 0.25);
+        g.gain.value = 0;
+        g.gain.linearRampToValueAtTime(leadVol, t + 0.05);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + stepDur * 2.2);
+        o.connect(bp); bp.connect(g); g.connect(ambGraph.musicG);
+        o.start(t); o.stop(t + stepDur * 2.3);
+      }
+
+      // ---- 危险度 > 0.55：加入"半音悬置"音（不安感）----
+      if (danger > 0.55 && step % 4 === 2) {
+        // 用 F# 或 B 半音（宫调外音），制造不安
+        const f = ambGraph.SCALE_HI[1] * 1.189; // D 半音上移
+        const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(f, t);
+        const gVol = mVol * 0.30 * (danger - 0.55);
+        g.gain.value = 0;
+        g.gain.linearRampToValueAtTime(gVol, t + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + stepDur * 1.8);
+        o.connect(g); g.connect(ambGraph.musicG);
+        o.start(t); o.stop(t + stepDur * 1.9);
+      }
+
+      // ---- 危险度 > 0.7：加入编钟琶音（三连音，铜磬泛音）----
+      if (danger > 0.7 && step % 8 === 0) {
+        for (let k = 0; k < 3; k++) {
+          const tk = t + k * stepDur * 1.5;
+          const f = ambGraph.SCALE_HI[(step >> 2) % ambGraph.SCALE_HI.length] * 1.5;
+          gong(tk, f, mVol * 0.35, 1.6);
+        }
+      }
+
+      ambGraph.step = (ambGraph.step + 1) % 64;
+      ambGraph.nextStepAt += stepDur;
+    }
+  }
+  ambGraph.musicTimer = setInterval(scheduleMusic, 25);
+}
+
+// 每帧调用：把当前状态/危险度翻译成氛围音参数；心跳音在定时器回调里播
+let lastBeatAt = 0, lastWarnAt = 0, lastWarnHazard = -1;
+function updateAmbience(dt) {
+  if (!ambGraph || !audioCtx) return;
+  // 计算目标紧张度
+  let target = 'title';
+  if (state === 'play') target = 'game';
+  else if (state === 'intro' || state === 'clear' || state === 'ending') target = 'game';
+  if (target !== ambState) setAmbState(target);
+
+  // 危险度：0..1，依据"最近危险物距离 + 玩家血量 + 死亡倒计时"综合
+  let danger = 0;
+  if (state === 'play') {
+    // 血量系数：越剩越少越紧张
+    const hpFactor = Math.max(0, (MAXHP - player.hp) / MAXHP);
+    danger += hpFactor * 0.35;
+    // 死亡倒计时：扣血到 0 后短暂高紧张
+    if (deathTimer > 0) danger += 0.6;
+    else if (player.inv > 0) danger += player.inv * 0.3;
+    // 危险物近距离
+    if (haz.length) {
+      let minD = 99999;
+      let closest = -1;
+      for (let i = 0; i < haz.length; i++) {
+        const h = haz[i];
+        // 用 hazard 中心（laser 用 cur，rock 用 cx，其他用 x/gy）
+        let hx, hy;
+        if (h.t === 'laser') { hx = h.cur; hy = h.y + (h.hgt || 100) * 0.5; }
+        else if (h.t === 'rock') { hx = h.x; hy = h.cx !== undefined ? h.cx : h.gy; }
+        else { hx = h.x; hy = h.gy - (h.hgt || 0) * 0.5; }
+        const dx = hx - player.x, dy = hy - player.y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < minD) { minD = d; closest = i; }
+      }
+      // 距离 < 380 像素开始紧张，越近越强
+      if (minD < 380) {
+        danger += (1 - minD / 380) * 0.45;
+        // 危险物首次进入近距范围时，播一声"嘶——"
+        if (closest !== lastWarnHazard && tGlobal - lastWarnAt > 1.2) {
+          sfxWarn();
+          lastWarnAt = tGlobal;
+          lastWarnHazard = closest;
+        }
+      } else if (closest === -1) {
+        lastWarnHazard = -1;
+      }
+    }
+  }
+  setAmbDanger(danger);
+  ambGraph.dangerCur += (danger - ambGraph.dangerCur) * Math.min(1, dt * 6);
+
+  // 心跳：只在游戏状态且非死亡时；BPM 受危险度调制
+  const isPlaying = (state === 'play');
+  const wantBeat = isPlaying && ambGraph.beatOn && deathTimer <= 0;
+  const bpm = ambGraph.beatBPM + ambGraph.dangerCur * 56;   // 84 → 最多 140
+  const interval = 60 / bpm;
+  if (wantBeat && (tGlobal - lastBeatAt) >= interval) {
+    const vol = 0.28 + ambGraph.dangerCur * 0.42;   // 0.28 → 0.70
+    sfxHeartbeat(vol);
+    lastBeatAt = tGlobal;
+    lastWarnHazard = -1;   // 心跳后重置，允许下一次靠近再次提示
+  }
 }
 
 /* ================= 关卡 ================= */
@@ -207,7 +796,7 @@ const LEVELS = [
       [280, 470, 180, 26], [1100, 470, 180, 26], [1900, 450, 200, 26]
     ],
     motes: [{ x: 370, y: 415 }, { x: 1190, y: 415 }, { x: 2000, y: 395 }],
-    line: '它先是一团火。商代的风箱吹亮炉膛，铜与锡在范里凝成一张脸。',
+    line: '它本来是一张金面具。祭司把它贴上铜头，然后把它封进炉火里。',
     hazards: [
       { t: 'fire', x: 810, gy: 726, w: 74, hgt: 258, warn: 0.85, on: 1.15, off: 1.4, ph: 0.0 },
       { t: 'fire', x: 1400, gy: 620, w: 58, hgt: 156, warn: 0.8, on: 1.0, off: 1.5, ph: 1.2 },
@@ -216,7 +805,7 @@ const LEVELS = [
     lines: [
       { x: 300, text: '商代的风箱吹亮炉膛。' },
       { x: 1000, text: '铜与锡熔成铜液，注入合范。' },
-      { x: 1900, text: '一张青铜的脸，从熔铜里浮出成形。' }
+      { x: 1900, text: '铜头冷却的那一刻，黄金才第一次被剥离。' }
     ]
   },
   {
@@ -227,7 +816,7 @@ const LEVELS = [
       [240, 460, 170, 26], [900, 450, 170, 26], [1660, 470, 170, 26], [2320, 450, 170, 26]
     ],
     motes: [{ x: 325, y: 405 }, { x: 985, y: 395 }, { x: 1745, y: 415 }],
-    line: '它被抬上祭坛，看过火，也看过跪拜的人。',
+    line: '金光还在铜脸上闪。祭司举着它跪下，火焰把它镀上一层神性。',
     hazards: [
       { t: 'fire', x: 700, gy: 620, w: 60, hgt: 168, warn: 0.8, on: 1.1, off: 1.3, ph: 0.4 },
       { t: 'fire', x: 1420, gy: 620, w: 60, hgt: 168, warn: 0.8, on: 1.1, off: 1.3, ph: 1.5 },
@@ -235,9 +824,9 @@ const LEVELS = [
       { t: 'fire', x: 2450, gy: 620, w: 60, hgt: 168, warn: 0.8, on: 1.1, off: 1.3, ph: 0.9 }
     ],
     lines: [
-      { x: 320, text: '它被抬上祭坛，立于中央。' },
-      { x: 1100, text: '火光自下而上，照亮它的双耳。' },
-      { x: 1900, text: '跪拜的人俯下身，烟升向夜空。' }
+      { x: 320, text: '铜头被抬上祭坛，还带着金箔的余温。' },
+      { x: 1100, text: '火光自下而上，把那张脸镀成琥珀色。' },
+      { x: 1900, text: '跪拜的人俯下身——那是最后一场有火的仪式。' }
     ]
   },
   {
@@ -248,7 +837,7 @@ const LEVELS = [
       [180, 450, 160, 26], [820, 440, 160, 26], [1500, 460, 160, 26], [2350, 452, 170, 26]
     ],
     motes: [{ x: 260, y: 395 }, { x: 900, y: 385 }, { x: 2430, y: 388 }],
-    line: '后来它被埋进土里，绿锈一寸寸爬上眼角。',
+    line: '王朝倒了。泥土从头顶落下来，金光一寸一寸退成孔雀绿。',
     hazards: [
       { t: 'rust', x: 420, gy: 620, w: 58, hgt: 150, warn: 0.7, on: 1.05, off: 1.15, ph: 0.0 },
       { t: 'rust', x: 1000, gy: 620, w: 58, hgt: 150, warn: 0.7, on: 1.05, off: 1.15, ph: 0.9 },
@@ -257,8 +846,8 @@ const LEVELS = [
     ],
     lines: [
       { x: 300, text: '泥土自上方倾泻，覆盖面孔的下半部。' },
-      { x: 1050, text: '时间开始加速。' },
-      { x: 1900, text: '孔雀绿的锈，如藤蔓从眼角向外蔓延。' }
+      { x: 1050, text: '时间在地下加速——金箔先剥落，然后铜身被氧化。' },
+      { x: 1900, text: '孔雀绿的锈，从眼角一寸寸向外爬满整张脸。' }
     ]
   },
   {
@@ -269,7 +858,7 @@ const LEVELS = [
       [200, 460, 160, 26], [860, 440, 160, 26], [1580, 450, 160, 26], [2260, 440, 160, 26]
     ],
     motes: [{ x: 280, y: 405 }, { x: 940, y: 385 }, { x: 2340, y: 385 }],
-    line: '1986 年，广汉，二号祭祀坑。刷子扫开泥土，它重新看见了光。',
+    line: '1986 年，广汉。刷子扫开土，一个锈得发绿的铜头从地下抬头。',
     hazards: [
       { t: 'rock', x: 420, gy: 620, size: 62, yTop: 120, warn: 0.8, on: 0.7, off: 1.5, ph: 0.0 },
       { t: 'rock', x: 1150, gy: 620, size: 62, yTop: 100, warn: 0.8, on: 0.7, off: 1.5, ph: 0.8 },
@@ -278,8 +867,8 @@ const LEVELS = [
     ],
     lines: [
       { x: 300, text: '探方里，黄土层一层层被剥开。' },
-      { x: 1100, text: '软毛刷扫过，杏眼的位置刚露出一点。' },
-      { x: 2000, text: '它重新看见了光。' }
+      { x: 1100, text: '刷毛扫过的地方，金光没剩下——只有绿锈。' },
+      { x: 2000, text: '它睁开眼，看见的不是商人，而是我们。' }
     ]
   },
   {
@@ -290,15 +879,15 @@ const LEVELS = [
       [400, 470, 200, 26], [1000, 445, 200, 26], [1600, 470, 200, 26]
     ],
     motes: [{ x: 500, y: 415 }, { x: 1100, y: 375 }, { x: 1700, y: 415 }],
-    line: '今天，它站在东莞的展柜里，与你对视。',
+    line: '它站在东莞的玻璃柜里。你走近，它还在想：我原本，是金的。',
     hazards: [
-      { t: 'laser', x0: 260, x1: 1020, y: 250, w: 26, hgt: 370, spd: 190, ph: 0.0 },
-      { t: 'laser', x0: 1160, x1: 1980, y: 250, w: 26, hgt: 370, spd: 160, ph: 0.6 }
+      { t: 'laser', x0: 260, x1: 1020, y: 320, w: 24, hgt: 80, spd: 190, ph: 0.0 },
+      { t: 'laser', x0: 1160, x1: 1980, y: 320, w: 24, hgt: 80, spd: 160, ph: 0.6 }
     ],
     lines: [
       { x: 300, text: '展厅里，射灯的光柱缓缓扫过。' },
       { x: 1100, text: '玻璃反光中，观众的身影驻足又离开。' },
-      { x: 1800, text: '它站在展柜里，等你走近。' }
+      { x: 1800, text: '铜身还绿着——但它记得，自己曾经发过金光。' }
     ]
   }
 ];
@@ -312,7 +901,8 @@ const STEP = 1 / 120;
 const player = {
   x: 0, y: 0, r: 27, vx: 0, vy: 0,
   grounded: false, coyote: 0, buffer: 0, face: 1,
-  sx: 1, sy: 1, inv: 0
+  sx: 1, sy: 1, inv: 0,
+  goldFlash: 0
 };
 
 const cam = { x: 0 };
@@ -349,7 +939,64 @@ function loadLevel(i) {
   motes.length = 0;
   for (const m of level.motes) motes.push({ x: m.x, y: m.y, taken: false });
   burst = [];
-  haz = (level.hazards || []).map(h => Object.assign({}, h, { rect: null, cur: 0, firing: false }));
+  haz = (level.hazards || []).map((h, hi) => {
+    const c = Object.assign({}, h, { rect: null, cur: 0, firing: false });
+    // rock 专属：每块土块形态都不同（真夯土块从坑壁脱落，形状不规则）
+    if (h.t === 'rock') {
+      // 6 个环状不规则顶点（归一化 [-1,1]，绘制时按 size 缩放）
+      const n = 6;
+      const pts = [];
+      const jitSeed = (h.x + hi * 7) * 13;
+      const rnd = () => {
+        const s = Math.sin(jitSeed + pts.length * 13.37) * 43758.5453;
+        return s - Math.floor(s);
+      };
+      for (let k = 0; k < n; k++) {
+        const ang = (k / n) * Math.PI * 2 + rnd() * 0.45;
+        const r = 0.68 + rnd() * 0.42;  // 半径 0.68–1.10 的随机扰动
+        pts.push({ x: Math.cos(ang) * r, y: Math.sin(ang) * r * (0.85 + rnd() * 0.25) });
+      }
+      c.shape = pts;
+      // 2 条主裂纹（从内部一点出发，两个方向）
+      c.cracks = [];
+      for (let k = 0; k < 2; k++) {
+        c.cracks.push({
+          x0: (rnd() - 0.5) * 0.5, y0: (rnd() - 0.5) * 0.5,
+          x1: (rnd() - 0.5) * 1.4, y1: (rnd() - 0.5) * 1.2
+        });
+      }
+      c.crackLen = 2;
+      // 表面碎屑点（3 个）
+      c.chips = [];
+      for (let k = 0; k < 3; k++) {
+        c.chips.push({
+          x: (rnd() - 0.5) * 0.9, y: (rnd() - 0.5) * 0.7,
+          s: 0.6 + rnd() * 0.6
+        });
+      }
+      // 状态机（覆盖旧字段）
+      c.phase = 'idle';
+      c.tInPhase = 0;
+      c.warnTotal = h.warn;
+      c.onTotal = h.on;
+      c.offTotal = h.off;
+      c.cx = h.yTop;
+      c.vy = 0;
+      c.vr = (rnd() - 0.5) * 6;
+      c.rot = 0;
+      c.phaseP = 0;
+      c.impactT = 0;
+      c.shakePhase = rnd() * Math.PI * 2;
+      c.dropped = 0;
+      c.shards = null;
+      c.dust = null;
+      c.pit = null;
+      c._warnPlayed = false;
+      c._impactPlayed = false;
+      c.rect = null;
+    }
+    return c;
+  });
   lineIdx = 0;
   sub = null;
   hurtFlash = 0;
@@ -376,8 +1023,8 @@ function hurt(fromX) {
   player.vx = (player.x < fromX ? -1 : 1) * 320;
   player.vy = -440;
   player.grounded = false;
-  tone(140, 0.28, 'square', 0.13);
-  if (player.hp <= 0) { deathTimer = 0.95; deathFlashOn(); }
+  sfxHit();
+  if (player.hp <= 0) { deathTimer = 0.95; deathFlashOn(); sfxDeath(); }
 }
 function deathFlashOn() { hurtFlash = 1.0; }
 
@@ -399,20 +1046,134 @@ function updateHazards(dt) {
       h.cur = cx;
       h.rect = { x: cx - h.w / 2, y: h.y, w: h.w, h: h.hgt };
     } else if (h.t === 'rock') {
-      const per = h.warn + h.on + h.off;
+      // 状态机：idle → precursor（边缘碎屑先兆）→ shaking（颤动加剧+下沉）→ falling（重力加速）→ impact（撞击碎块+坑痕）→ idle
+      h.tInPhase = (h.tInPhase || 0) + dt;
+      const precT = Math.max(0.20, h.warnTotal * 0.45);  // 先兆时长
+      const shakeT_ = Math.max(0.30, h.warnTotal - precT); // 颤动加剧时长
+      // 分阶段判定（基于 tGlobal，保证多 rock 相位错开）
+      const per = h.warnTotal + h.onTotal + h.offTotal + 0.05;
       const tp = (tGlobal + (h.ph || 0)) % per;
-      if (tp < h.warn) {
+      h.warning = false;
+      h.firing = false;
+
+      if (tp < precT) {
+        // precursor：土块位置不动，只出现边缘碎屑先兆
+        h.phase = 'precursor';
         h.cx = h.yTop;
-        h.warning = true;
-      } else if (tp < h.warn + h.on) {
-        h.warning = false;
+        h.phaseP = tp / precT;
+        if (!h._warnPlayed) { sfxRockWarn(); h._warnPlayed = true; }
+      } else if (tp < precT + shakeT_) {
+        // shaking：颤动加剧 + 缓慢下沉 4px
+        h.phase = 'shaking';
+        h.phaseP = (tp - precT) / shakeT_;
+        h.cx = h.yTop + 4 * Math.min(1, h.phaseP);
+      } else if (tp < precT + shakeT_ + h.onTotal) {
+        // falling：重力加速坠落
+        h.phase = 'falling';
+        h._warnPlayed = false;
         h.firing = true;
-        const p = (tp - h.warn) / h.on;
-        h.cx = h.yTop + (h.gy - h.yTop - h.size) * Math.min(1, p * 1.7);
-        h.rect = { x: h.x - h.size / 2, y: h.cx, w: h.size, h: h.size };
-      } else {
-        h.warning = false;
+        const fallT = tp - precT - shakeT_;
+        // 目标距离
+        const dist = h.gy - h.yTop - h.size - 4;
+        // 用二次方程反解 g，使 fallT 时刚好落地：dist = 0.5 * g * t^2
+        const g = 2 * dist / (h.onTotal * h.onTotal);
+        h.cx = h.yTop + 4 + 0.5 * g * fallT * fallT;
+        h.vy = g * fallT;
+        h.rot = h.vr * fallT;
+        // 撞击判定
+        if (h.cx >= h.gy - h.size) {
+          h.cx = h.gy - h.size;
+          h.phase = 'impact';
+          h.phaseP = 0;
+          h._impactPlayed = false;
+          // 生成碎块：1 主残块（原 rock 主体，较小，落到地面）+ 2 小碎片飞散
+          h.shards = [];
+          // 主残块：size 缩到 0.55，作为"碎裂后剩下的核心"
+          h.shards.push({
+            x: h.x + (Math.random() - 0.5) * 6, y: h.gy - h.size * 0.28,
+            vx: (Math.random() - 0.5) * 30, vy: -60 - Math.random() * 30,
+            s: h.size * 0.55, rot: Math.random() * 0.6 - 0.3, vr: (Math.random() - 0.5) * 3,
+            shape: h.shape, cracks: h.cracks, chips: h.chips,
+            life: 2.0, t: 0, main: true
+          });
+          // 2 小碎片：从撞击点扇形飞出
+          for (let k = 0; k < 2; k++) {
+            const ang = -Math.PI / 2 + (k === 0 ? -1 : 1) * (0.55 + Math.random() * 0.3);
+            const spd = 240 + Math.random() * 180;
+            h.shards.push({
+              x: h.x + (Math.random() - 0.5) * h.size * 0.4, y: h.gy - 6,
+              vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
+              s: 4 + Math.random() * 5, rot: Math.random() * 6.28, vr: (Math.random() - 0.5) * 14,
+              life: 0.7 + Math.random() * 0.3, t: 0, main: false
+            });
+          }
+          // 扬尘
+          h.dust = [];
+          for (let k = 0; k < 10; k++) {
+            const ang = -Math.PI + Math.random() * Math.PI;
+            const spd = 40 + Math.random() * 90;
+            h.dust.push({
+              x: h.x + (Math.random() - 0.5) * h.size * 0.8, y: h.gy - 4,
+              vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd * 0.6 - 30,
+              life: 0.6 + Math.random() * 0.4, t: 0, s: 2 + Math.random() * 3
+            });
+          }
+          // 坑痕
+          h.pit = { x: h.x, life: 4.5, t: 0 };
+          shakeT = Math.max(shakeT, 0.28);
+        }
+      } else if (tp < precT + shakeT_ + h.onTotal + 0.30) {
+        // impact：撞击后短暂表现（碎片飞出、扬尘扩散、坑痕形成）
+        h.phase = 'impact';
         h.cx = h.gy - h.size;
+        h.phaseP = (tp - precT - shakeT_ - h.onTotal) / 0.30;
+        if (!h._impactPlayed) { sfxRockImpact(); h._impactPlayed = true; }
+      } else {
+        // idle：等待下一次
+        h.phase = 'idle';
+        h.cx = h.yTop;
+        h.phaseP = 0;
+        h._warnPlayed = false;
+      }
+
+      // 更新碎块 & 扬尘
+      if (h.shards) {
+        for (const sd of h.shards) {
+          sd.t += dt;
+          sd.vy += 900 * dt;
+          sd.x += sd.vx * dt; sd.y += sd.vy * dt;
+          sd.rot += sd.vr * dt;
+          // 主残块落地约束（不能再穿透地面）
+          if (sd.main && sd.y > h.gy - sd.s / 2) {
+            sd.y = h.gy - sd.s / 2;
+            if (sd.vy > 0) sd.vy *= -0.15; // 微反弹
+            sd.vx *= 0.6;
+            sd.vr *= 0.5;
+          }
+        }
+        h.shards = h.shards.filter(sd => sd.t < sd.life);
+        if (h.shards.length === 0) h.shards = null;
+      }
+      if (h.dust) {
+        for (const d of h.dust) {
+          d.t += dt;
+          d.vy += 200 * dt;
+          d.x += d.vx * dt; d.y += d.vy * dt;
+        }
+        h.dust = h.dust.filter(d => d.t < d.life);
+        if (h.dust.length === 0) h.dust = null;
+      }
+      if (h.pit) {
+        h.pit.t += dt;
+        h.pit.life -= dt;
+        if (h.pit.life <= 0) h.pit = null;
+      }
+
+      // 落点 rect 只在 falling / impact 早期有效
+      if (h.phase === 'falling') {
+        h.rect = { x: h.x - h.size / 2, y: h.cx, w: h.size, h: h.size };
+      } else if (h.phase === 'impact' && h.phaseP < 0.5) {
+        h.rect = { x: h.x - h.size / 2, y: h.gy - h.size, w: h.size, h: h.size };
       }
     } else {
       const per = h.warn + h.on + h.off;
@@ -447,6 +1208,7 @@ function updateSubs(dt) {
 
 /* ================= 物理步进 ================= */
 function step(dt) {
+  const wasGrounded = player.grounded, vyBefore = player.vy;
   const dir = (input.right ? 1 : 0) - (input.left ? 1 : 0);
   if (dir !== 0) {
     player.vx += dir * ACC * dt;
@@ -469,6 +1231,7 @@ function step(dt) {
     player.buffer = 0;
     player.coyote = 0;
     player.grounded = false;
+    sfxJump();
   }
   if (!input.jumpHeld && player.vy < 0) player.vy += GRAV * 2.2 * dt;
 
@@ -509,6 +1272,7 @@ function step(dt) {
     }
   }
   player.grounded = onGround;
+  if (!wasGrounded && onGround && vyBefore > 260) sfxLand();
 
   if (player.y > H + 240) respawn();
 
@@ -518,10 +1282,11 @@ function step(dt) {
   for (const m of motes) {
     if (m.taken) continue;
     const dx = m.x - player.x, dy = m.y - player.y;
-    if (dx * dx + dy * dy < 2600) {
+    if (dx * dx + dy * dy < 3400) {
       m.taken = true;
       collected++;
-      tone(660 + collected * 90, 0.35, 'sine', 0.10);
+      sfxCoin();
+      player.goldFlash = 1.8;
       for (let i = 0; i < 14; i++) {
         burst.push({
           x: m.x, y: m.y,
@@ -543,8 +1308,7 @@ function step(dt) {
   if (atGoal && collected >= level.motes.length) {
     state = 'clear';
     stateT = 0;
-    tone(523, 0.5, 'sine', 0.10);
-    setTimeout(() => tone(784, 0.7, 'sine', 0.09), 120);
+    sfxClear();
   }
 
   /* --- 挤压拉伸 --- */
@@ -797,100 +1561,664 @@ function bgBurial() {
   }
 }
 
-// 发掘：探方、黄土剖面、光柱、浮尘
+// 发掘：探方剖面——地表层 + 考古人员 + 坑壁（夯土/生土/石铺）+ 探方口光
 function bgDig() {
-  drawSky('dig');
-  // 探方格线
-  ctx.save();
-  ctx.strokeStyle = 'rgba(40,30,18,0.35)';
+  // 天空/地表层（顶部 0~95px 是地表，能看到考古人员在坑外）
+  const surfG = ctx.createLinearGradient(0, 0, 0, 100);
+  surfG.addColorStop(0, '#c4a878');   // 阳光下的黄土
+  surfG.addColorStop(1, '#7a5c36');   // 地表向下过渡
+  ctx.fillStyle = surfG;
+  ctx.fillRect(0, 0, W, 100);
+
+  // 地表细节：草斑、土疙瘩、探方边缘绳线
+  ctx.fillStyle = 'rgba(90,120,60,0.35)';
+  for (let i = 0; i < 40; i++) {
+    const x = (i * 71 - cam.x * 0.4) % (W + 40);
+    ctx.fillRect(((x % (W + 40)) + W + 40) % (W + 40) - 20, 40 + (i % 3) * 8, 8, 3);
+  }
+
+  // 探方框（考古现场用红绳/木桩围起来的方坑）
+  ctx.strokeStyle = 'rgba(160,60,50,0.55)';   // 红绳警戒线
   ctx.lineWidth = 2;
-  for (let i = -1; i < 8; i++) {
-    const x = i * 200 - (cam.x * 0.6 % 200);
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + 60, H); ctx.stroke();
+  ctx.setLineDash([10, 6]);
+  ctx.beginPath(); ctx.moveTo(0, 96); ctx.lineTo(W, 96); ctx.stroke();
+  ctx.setLineDash([]);
+  // 木桩
+  for (let i = -1; i < 14; i++) {
+    const x = i * 130 - (cam.x * 0.9 % 130);
+    ctx.fillStyle = '#3a2818';
+    ctx.fillRect(x, 88, 6, 16);
+    ctx.fillStyle = 'rgba(255,220,180,0.5)';
+    ctx.fillRect(x, 88, 6, 3);
   }
-  for (let j = 0; j < 5; j++) {
-    const y = 120 + j * 130;
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y + 8); ctx.stroke();
+
+  // ---- 背景层不做考古员，实际考古员由 drawDigGroundMarkers 画在平台层 ----
+
+  // ---- 坑内壁（95 ~ 175 的过渡：从地表进入坑内，土色渐变到深色）----
+  const wallG = ctx.createLinearGradient(0, 95, 0, 200);
+  wallG.addColorStop(0, '#7a5c36');
+  wallG.addColorStop(0.4, '#4a3420');
+  wallG.addColorStop(1, '#2a1e12');
+  ctx.fillStyle = wallG;
+  ctx.fillRect(0, 95, W, 105);
+
+  // ---- 主坑体（200~720）：分层黄土，从上到下逐渐更深 ----
+  // 第 1 层：耕土（松散、有草根）
+  const l1 = ctx.createLinearGradient(0, 175, 0, 380);
+  l1.addColorStop(0, '#3a2818'); l1.addColorStop(1, '#2a1e12');
+  ctx.fillStyle = l1; ctx.fillRect(0, 175, W, 205);
+
+  // 第 2 层：夯土（更紧、颜色偏红褐）
+  const l2 = ctx.createLinearGradient(0, 380, 0, 560);
+  l2.addColorStop(0, '#3a2416'); l2.addColorStop(1, '#241812');
+  ctx.fillStyle = l2; ctx.fillRect(0, 380, W, 180);
+
+  // 第 3 层：生土（最深、暗褐）
+  const l3 = ctx.createLinearGradient(0, 560, 0, H);
+  l3.addColorStop(0, '#2a1a10'); l3.addColorStop(1, '#160e08');
+  ctx.fillStyle = l3; ctx.fillRect(0, 560, W, H - 560);
+
+  // ---- 探方坑壁的层位编号牌（第1层/第2层/第3层，沿坑壁左侧贴）----
+  const stratLabels = [
+    { y: 175, txt: '第①层 耕土' },
+    { y: 380, txt: '第②层 夯土' },
+    { y: 560, txt: '第③层 生土' }
+  ];
+  for (const sl of stratLabels) {
+    // 沿坑壁每隔 700px 出现一次（跟随摄像机轻微视差）
+    const spacing = 700;
+    const startOff = -((cam.x * 0.85) % spacing);
+    for (let ox = startOff; ox < W + spacing; ox += spacing) {
+      const bx = ox + 30;
+      const by = sl.y + 8;
+      // 木牌（浅木色 + 黑框）
+      ctx.fillStyle = '#d8c088';
+      ctx.fillRect(bx, by, 72, 18);
+      ctx.strokeStyle = '#3a2818';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(bx + 0.5, by + 0.5, 71, 17);
+      // 编号文字
+      ctx.fillStyle = '#1a0a00';
+      ctx.font = 'bold 10px Consolas, monospace';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(sl.txt, bx + 4, by + 10);
+      // 挂绳（从坑壁顶端一根细绳垂下来）
+      ctx.strokeStyle = 'rgba(30,20,10,0.6)';
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.moveTo(bx + 36, sl.y);
+      ctx.lineTo(bx + 36, by);
+      ctx.stroke();
+    }
   }
-  ctx.restore();
-  // 光柱
+
+  // ---- 坑壁的完整测绘绳网：白绳横贯整个坑壁 + 竹桩阵列 ----
+  // 竹桩沿坑壁左侧（画面边缘）立一排，形成"探方四角桩"的延伸感
+  const poleSpacing = 180;
+  const poleStart = -((cam.x * 0.85) % poleSpacing);
+  // 坑壁顶部沿（y=175 位置）立竹桩
+  for (let px = poleStart - 20; px < W + 20; px += poleSpacing) {
+    // 竹桩本体（黄色 + 竹节）
+    const gPole = ctx.createLinearGradient(px, 0, px + 5, 0);
+    gPole.addColorStop(0, '#a88850');
+    gPole.addColorStop(0.5, '#c8a868');
+    gPole.addColorStop(1, '#7a5c30');
+    ctx.fillStyle = gPole;
+    ctx.fillRect(px, 172, 5, 40);
+    // 竹节
+    ctx.fillStyle = '#5c4020';
+    for (let ny = 178; ny < 208; ny += 8) {
+      ctx.fillRect(px, ny, 5, 1);
+    }
+  }
+  // 右侧同间距也立一排（形成探方两端桩阵）
+  const poleSpacingR = 220;
+  const poleStartR = -((cam.x * 0.85) % poleSpacingR);
+  for (let px = poleStartR; px < W + 20; px += poleSpacingR) {
+    const gPole = ctx.createLinearGradient(px, 0, px + 5, 0);
+    gPole.addColorStop(0, '#8a6a38');
+    gPole.addColorStop(0.5, '#b0905a');
+    gPole.addColorStop(1, '#6a4c20');
+    ctx.fillStyle = gPole;
+    ctx.fillRect(px, 174, 4, 36);
+    ctx.fillStyle = '#5c4020';
+    for (let ny = 180; ny < 206; ny += 8) {
+      ctx.fillRect(px, ny, 4, 1);
+    }
+  }
+
+  // 横向白绳：从坑壁左侧一路延伸到右侧（探方测绘横线）
+  ctx.strokeStyle = 'rgba(255,248,220,0.32)';
+  ctx.lineWidth = 1.2;
+  // 主横线：坑壁顶沿（探方边界）
+  ctx.beginPath();
+  ctx.moveTo(0, 172);
+  ctx.lineTo(W, 172);
+  ctx.stroke();
+  // 副横线：往坑内每 60px 一根（探方分层横线）
+  ctx.strokeStyle = 'rgba(255,240,200,0.14)';
+  ctx.lineWidth = 0.8;
+  for (let yy = 232; yy < 560; yy += 60) {
+    ctx.beginPath();
+    ctx.moveTo(0, yy);
+    ctx.lineTo(W, yy);
+    ctx.stroke();
+  }
+  // 竖直白绳：从坑壁顶到底（探方纵线，间距 200px）
+  ctx.strokeStyle = 'rgba(255,240,200,0.16)';
+  ctx.lineWidth = 1;
+  const vSpacing = 200;
+  const vStart = -((cam.x * 0.85) % vSpacing);
+  for (let vx = vStart; vx < W + vSpacing; vx += vSpacing) {
+    ctx.beginPath();
+    ctx.moveTo(vx, 172);
+    ctx.lineTo(vx, 560);
+    ctx.stroke();
+  }
+
+  // ---- 土层交界线（考古学上明显的"层位"分界）----
+  for (const y of [175, 380, 560]) {
+    ctx.strokeStyle = 'rgba(90,70,40,0.35)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    // 微起伏让分界更自然
+    ctx.strokeStyle = 'rgba(120,90,50,0.25)';
+    ctx.beginPath();
+    for (let x = 0; x < W; x += 20) {
+      const yy = y + Math.sin(x * 0.02 + y) * 2;
+      if (x === 0) ctx.moveTo(x, yy); else ctx.lineTo(x, yy);
+    }
+    ctx.stroke();
+  }
+
+  // ---- 坑壁上的洛阳铲手铲：几把工具散在坑壁上 ----
+  for (let i = 0; i < 3; i++) {
+    const sx = ((i * 640 - cam.x * 0.85) % (W + 400) + W + 400) % (W + 400) - 200;
+    if (sx < -40 || sx > W + 40) continue;
+    const sy = 500 + i * 30;
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(-0.5);
+    // 木柄
+    const hG = ctx.createLinearGradient(0, 0, 0, 22);
+    hG.addColorStop(0, '#7a5830');
+    hG.addColorStop(1, '#4a3018');
+    ctx.fillStyle = hG;
+    ctx.fillRect(-2, 0, 4, 22);
+    // 铲头
+    const bG = ctx.createLinearGradient(-9, 0, 9, 0);
+    bG.addColorStop(0, '#4a4a52');
+    bG.addColorStop(0.5, '#7a7a82');
+    bG.addColorStop(1, '#2a2a32');
+    ctx.fillStyle = bG;
+    ctx.beginPath();
+    ctx.moveTo(-9, 22);
+    ctx.lineTo(9, 22);
+    ctx.lineTo(6, 32);
+    ctx.lineTo(-6, 32);
+    ctx.closePath();
+    ctx.fill();
+    // 锈痕
+    ctx.fillStyle = 'rgba(120,60,20,0.5)';
+    ctx.fillRect(-7, 24, 14, 2);
+    ctx.restore();
+  }
+
+  // ---- 土层里的碎片点缀（陶片、骨头、石子）----
+  for (let i = 0; i < 55; i++) {
+    const seed = i * 41.7;
+    const yBand = seed % 3;
+    const yMin = yBand === 0 ? 200 : yBand === 1 ? 400 : 580;
+    const yMax = yBand === 0 ? 370 : yBand === 1 ? 550 : 700;
+    const px = ((seed * 37 + Math.sin(i) * 20 - cam.x * (0.85 - yBand * 0.05)) % (W + 60) + W + 60) % (W + 60) - 30;
+    const py = yMin + ((seed * 13) % (yMax - yMin));
+    if (yBand === 0) {
+      // 陶片（浅褐小三角形）
+      ctx.fillStyle = 'rgba(140,100,60,0.55)';
+      ctx.beginPath();
+      ctx.moveTo(px, py - 2); ctx.lineTo(px + 4, py + 2); ctx.lineTo(px - 4, py + 2);
+      ctx.closePath(); ctx.fill();
+    } else if (yBand === 1) {
+      // 骨头碎片（长条米色）
+      ctx.fillStyle = 'rgba(200,180,140,0.5)';
+      ctx.fillRect(px, py, 6, 2);
+    } else {
+      // 小石子（暗色圆点）
+      ctx.fillStyle = 'rgba(80,60,40,0.6)';
+      ctx.beginPath(); ctx.arc(px, py, 1.5, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // ---- 探方口顶部光：从地表透下来的天光 ----
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  for (let i = 0; i < 3; i++) {
-    const x = 240 + i * 420 - (cam.x * 0.3 % 420);
-    const g = ctx.createLinearGradient(x, 0, x + 160, H);
-    g.addColorStop(0, 'rgba(255,240,190,0.14)');
-    g.addColorStop(1, 'rgba(255,240,190,0)');
+  const topLight = ctx.createLinearGradient(0, 0, 0, 220);
+  topLight.addColorStop(0, 'rgba(255,240,190,0.35)');
+  topLight.addColorStop(0.4, 'rgba(255,230,170,0.14)');
+  topLight.addColorStop(1, 'rgba(255,220,150,0)');
+  ctx.fillStyle = topLight;
+  ctx.fillRect(0, 0, W, 220);
+
+  // 探方口光柱（几束从地表透下来的阳光）
+  for (let i = 0; i < 4; i++) {
+    const x = 200 + i * 340 - (cam.x * 0.5 % 340);
+    const g = ctx.createLinearGradient(x, 90, x + 60, 500);
+    g.addColorStop(0, 'rgba(255,240,190,0.22)');
+    g.addColorStop(0.5, 'rgba(255,220,150,0.08)');
+    g.addColorStop(1, 'rgba(255,200,120,0)');
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.moveTo(x - 40, 0); ctx.lineTo(x + 80, 0);
-    ctx.lineTo(x + 240, H); ctx.lineTo(x + 40, H);
+    ctx.moveTo(x - 20, 90); ctx.lineTo(x + 60, 90);
+    ctx.lineTo(x + 180, 500); ctx.lineTo(x + 60, 500);
     ctx.closePath(); ctx.fill();
   }
   ctx.restore();
-  // 浮尘
-  for (let i = 0; i < 70; i++) {
+
+  // ---- 坑内的浮尘 ----
+  for (let i = 0; i < 60; i++) {
     const seed = i * 61.3;
-    const px = ((seed * 9 + Math.sin(tGlobal * 0.5 + i) * 40 + tGlobal * 5) % W + W) % W;
-    const py = (seed * 13 + tGlobal * (10 + (i % 5) * 4)) % H;
-    ctx.fillStyle = `rgba(255,245,210,${0.15 + (i % 4) * 0.06})`;
-    ctx.fillRect(px, py, 2.2, 2.2);
+    const px = ((seed * 9 + Math.sin(tGlobal * 0.5 + i) * 40 + tGlobal * 5) % (W + 40) + W + 40) % (W + 40) - 20;
+    const py = 175 + ((seed * 13 + tGlobal * (10 + (i % 5) * 4)) % 500);
+    ctx.fillStyle = `rgba(255,245,210,${0.14 + (i % 4) * 0.06})`;
+    ctx.fillRect(px, py, 2, 2);
   }
 }
 
-// 展柜：暗展厅、射灯、玻璃反光
+// 展柜：暗展厅、吊顶灯带、墙面装饰、射灯光锥、玻璃反光、远处观众剪影
+// ---- 展品剪影（在博物馆玻璃展柜中，使用全局 ctx）----
+function drawStandingFig(cx, baseY) {
+  // 大立人像：高约 100，细长身体 + 高冠 + 环臂 + 长袍
+  const top = baseY - 100;
+  // 长袍（下宽上窄）
+  ctx.fillStyle = '#5a7048';
+  ctx.beginPath();
+  ctx.moveTo(cx - 14, baseY);
+  ctx.lineTo(cx - 10, top + 40);
+  ctx.lineTo(cx + 10, top + 40);
+  ctx.lineTo(cx + 14, baseY);
+  ctx.closePath();
+  ctx.fill();
+  // 长袍纹路（横向几道）
+  ctx.strokeStyle = 'rgba(30,50,25,0.7)';
+  ctx.lineWidth = 1;
+  for (let k = 1; k < 4; k++) {
+    const ly = top + 45 + k * 13;
+    ctx.beginPath(); ctx.moveTo(cx - 12, ly); ctx.lineTo(cx + 12, ly); ctx.stroke();
+  }
+  // 环臂（两肘向外弯曲）
+  ctx.strokeStyle = '#5a7048';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(cx - 10, top + 46);
+  ctx.quadraticCurveTo(cx - 22, top + 55, cx - 18, top + 68);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx + 10, top + 46);
+  ctx.quadraticCurveTo(cx + 22, top + 55, cx + 18, top + 68);
+  ctx.stroke();
+  // 空握的手（大立人特有的环握空）
+  ctx.strokeStyle = '#3a4a28';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx - 18, top + 70, 4, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx + 18, top + 70, 4, 0, Math.PI * 2); ctx.stroke();
+  // 头
+  ctx.fillStyle = '#5a7048';
+  ctx.beginPath();
+  ctx.ellipse(cx, top + 30, 8, 10, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // 高冠（立人像的筒形高冠）
+  ctx.fillStyle = '#6a8058';
+  ctx.fillRect(cx - 5, top + 14, 10, 18);
+  ctx.fillStyle = '#3a4a28';
+  ctx.fillRect(cx - 5, top + 14, 10, 2);
+}
+
+function drawBronzeMask(cx, baseY) {
+  // 青铜纵目面具：宽脸 + 突出的双眼柱 + 大耳
+  const top = baseY - 60;
+  // 面部底色
+  ctx.fillStyle = '#4a6848';
+  ctx.beginPath();
+  ctx.ellipse(cx, baseY - 20, 28, 20, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // 大耳（向两侧平伸）
+  ctx.beginPath();
+  ctx.moveTo(cx - 28, baseY - 22);
+  ctx.lineTo(cx - 40, baseY - 28);
+  ctx.lineTo(cx - 38, baseY - 14);
+  ctx.lineTo(cx - 28, baseY - 12);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(cx + 28, baseY - 22);
+  ctx.lineTo(cx + 40, baseY - 28);
+  ctx.lineTo(cx + 38, baseY - 14);
+  ctx.lineTo(cx + 28, baseY - 12);
+  ctx.closePath();
+  ctx.fill();
+  // 突出的眼睛柱（纵目特征）
+  ctx.fillStyle = '#6a8858';
+  ctx.fillRect(cx - 18, baseY - 26, 10, 6);
+  ctx.beginPath();
+  ctx.ellipse(cx - 22, baseY - 23, 5, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillRect(cx + 8, baseY - 26, 10, 6);
+  ctx.beginPath();
+  ctx.ellipse(cx + 22, baseY - 23, 5, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // 瞳孔（金色高亮）
+  ctx.fillStyle = '#d8b050';
+  ctx.beginPath(); ctx.arc(cx - 22, baseY - 23, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx + 22, baseY - 23, 2, 0, Math.PI * 2); ctx.fill();
+  // 大嘴
+  ctx.strokeStyle = '#2a3a18';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx - 14, baseY - 10);
+  ctx.quadraticCurveTo(cx, baseY - 4, cx + 14, baseY - 10);
+  ctx.stroke();
+  // 底座
+  ctx.fillStyle = '#3a2416';
+  ctx.fillRect(cx - 15, baseY - 4, 30, 4);
+}
+
+function drawSacredTree(cx, baseY) {
+  // 青铜神树：树干 + 三层枝叶 + 神鸟
+  // 底座
+  ctx.fillStyle = '#3a2416';
+  ctx.fillRect(cx - 12, baseY - 4, 24, 4);
+  // 树干
+  ctx.fillStyle = '#4a6848';
+  ctx.fillRect(cx - 2, baseY - 78, 4, 74);
+  // 三层枝叶（每层三支向外翘）
+  for (let lvl = 0; lvl < 3; lvl++) {
+    const ly = baseY - 30 - lvl * 16;
+    for (let d = -1; d <= 1; d += 2) {
+      ctx.strokeStyle = '#4a6848';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(cx, ly);
+      ctx.quadraticCurveTo(cx + d * 12, ly - 6, cx + d * 20, ly - 10);
+      ctx.stroke();
+      // 花蕾（小球）
+      ctx.fillStyle = '#5a7858';
+      ctx.beginPath();
+      ctx.arc(cx + d * 20, ly - 10, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  // 树顶神鸟
+  ctx.fillStyle = '#d8b050';
+  ctx.beginPath();
+  ctx.ellipse(cx, baseY - 82, 5, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // 鸟喙
+  ctx.beginPath();
+  ctx.moveTo(cx + 4, baseY - 82);
+  ctx.lineTo(cx + 8, baseY - 81);
+  ctx.lineTo(cx + 4, baseY - 80);
+  ctx.closePath();
+  ctx.fill();
+  // 神鸟尾羽
+  ctx.beginPath();
+  ctx.moveTo(cx - 4, baseY - 82);
+  ctx.lineTo(cx - 9, baseY - 84);
+  ctx.lineTo(cx - 4, baseY - 80);
+  ctx.closePath();
+  ctx.fill();
+}
+
 function bgMuseum() {
   drawSky('museum');
-  // 墙面装饰线
-  ctx.strokeStyle = 'rgba(80,90,110,0.15)';
+
+  // ---------- ① 吊顶层（0–30）：深色吊顶 + 暖色灯带 ----------
+  ctx.fillStyle = '#03050a';
+  ctx.fillRect(0, 0, W, 30);
+  ctx.fillStyle = 'rgba(20,16,10,0.85)';
+  ctx.fillRect(0, 24, W, 6);
+  // 暖色灯带（横向贯穿，暗示天花板有一整圈环境照明）
+  const bandG = ctx.createLinearGradient(0, 20, 0, 30);
+  bandG.addColorStop(0, 'rgba(255,220,150,0.0)');
+  bandG.addColorStop(0.5, 'rgba(255,220,150,0.55)');
+  bandG.addColorStop(1, 'rgba(255,220,150,0.0)');
+  ctx.fillStyle = bandG;
+  ctx.fillRect(0, 20, W, 10);
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = 'rgba(255,220,150,0.06)';
+  ctx.fillRect(0, 22, W, 8);
+  ctx.restore();
+
+  // ---------- ② 展厅后墙（30–260）：深色墙面 + 装饰线 ----------
+  const wallG = ctx.createLinearGradient(0, 30, 0, 260);
+  wallG.addColorStop(0, '#0a0e16');
+  wallG.addColorStop(1, '#050810');
+  ctx.fillStyle = wallG;
+  ctx.fillRect(0, 30, W, 230);
+  // 墙面装饰条（暗色横条）
+  ctx.strokeStyle = 'rgba(60,70,90,0.10)';
   ctx.lineWidth = 1;
-  for (let i = 1; i < 6; i++) {
+  for (let i = 1; i < 4; i++) {
+    const y = 30 + i * 55;
     ctx.beginPath();
-    ctx.moveTo(0, i * 120);
-    ctx.lineTo(W, i * 120);
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
     ctx.stroke();
   }
-  // 射灯光锥
+  // 墙上淡淡的射灯反射光晕
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
   for (let i = 0; i < 4; i++) {
     const x = 300 + i * 320 - (cam.x * 0.25 % 320);
-    const g = ctx.createLinearGradient(x, 0, x, 620);
-    g.addColorStop(0, 'rgba(255,240,200,0.16)');
-    g.addColorStop(1, 'rgba(255,240,200,0)');
+    const g = ctx.createRadialGradient(x, 200, 4, x, 200, 200);
+    g.addColorStop(0, 'rgba(255,220,150,0.08)');
+    g.addColorStop(1, 'rgba(255,220,150,0)');
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.moveTo(x - 18, 0);
-    ctx.lineTo(x + 18, 0);
-    ctx.lineTo(x + 130, 620);
-    ctx.lineTo(x - 130, 620);
+    ctx.arc(x, 200, 200, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  // ---------- ③ 墙面与射灯之间的过渡（260–290） ----------
+  const transG = ctx.createLinearGradient(0, 260, 0, 290);
+  transG.addColorStop(0, 'rgba(10,14,22,1)');
+  transG.addColorStop(1, 'rgba(8,10,16,1)');
+  ctx.fillStyle = transG;
+  ctx.fillRect(0, 260, W, 30);
+
+  // ---------- ④ 吊灯射灯装置（在吊顶下方悬挂）----------
+  // 5 个轨道射灯沿 x 均匀分布，随摄像机轻微视差
+  const spotSpacing = 320;
+  const spotStart = -((cam.x * 0.25) % spotSpacing);
+  for (let i = -1; i < 6; i++) {
+    const sx = spotStart + i * spotSpacing + 120;
+    // 吊杆
+    ctx.strokeStyle = 'rgba(20,24,32,0.9)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(sx, 0);
+    ctx.lineTo(sx, 22);
+    ctx.stroke();
+    // 射灯主体（圆柱形）
+    ctx.fillStyle = '#1a1e26';
+    ctx.fillRect(sx - 12, 18, 24, 22);
+    ctx.fillStyle = '#2a3040';
+    ctx.fillRect(sx - 12, 20, 24, 4);
+    // 灯泡（暖白发光）
+    ctx.fillStyle = '#fff2c8';
+    ctx.beginPath();
+    ctx.arc(sx, 40, 5, 0, Math.PI * 2);
+    ctx.fill();
+    // 灯泡光晕
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const hl = ctx.createRadialGradient(sx, 40, 2, sx, 40, 30);
+    hl.addColorStop(0, 'rgba(255,240,180,0.6)');
+    hl.addColorStop(1, 'rgba(255,240,180,0)');
+    ctx.fillStyle = hl;
+    ctx.beginPath();
+    ctx.arc(sx, 40, 30, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // ---------- ⑤ 射灯光锥（从每个射灯口照到地面）----------
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = -1; i < 6; i++) {
+    const sx = spotStart + i * spotSpacing + 120;
+    const g = ctx.createLinearGradient(sx, 40, sx, 620);
+    g.addColorStop(0, 'rgba(255,235,180,0.22)');
+    g.addColorStop(0.5, 'rgba(255,235,180,0.10)');
+    g.addColorStop(1, 'rgba(255,235,180,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(sx - 10, 40);
+    ctx.lineTo(sx + 10, 40);
+    ctx.lineTo(sx + 90, 620);
+    ctx.lineTo(sx - 90, 620);
     ctx.closePath();
     ctx.fill();
   }
   ctx.restore();
-  // 玻璃反光条
-  ctx.save();
-  ctx.globalAlpha = 0.06;
-  ctx.fillStyle = '#cfe8ff';
-  for (let i = 0; i < 3; i++) {
-    const x = 120 + i * 460 - (cam.x * 0.5 % 460);
+
+  // ---------- ⑥ 玻璃展柜 + 展品（沿地面一字排开，随视差滚动）----------
+  const caseSpacing = 420;
+  const caseStart = -((cam.x * 0.9) % caseSpacing);
+  // 展品剪影（三种：大立人 / 青铜面具 / 神树）
+  const exhibits = [
+    { name: '大立人', draw: drawStandingFig },
+    { name: '青铜面具', draw: drawBronzeMask },
+    { name: '神树', draw: drawSacredTree }
+  ];
+  for (let i = -1; i < 7; i++) {
+    const cx = caseStart + i * caseSpacing + 60;
+    if (cx + 180 < -20 || cx > W + 20) continue;
+    const ex = exhibits[((i % 3) + 3) % 3];
+
+    // 展台底座
+    ctx.fillStyle = '#1a1410';
+    ctx.fillRect(cx, 555, 180, 65);
+    ctx.fillStyle = '#2a2018';
+    ctx.fillRect(cx, 555, 180, 6);
+
+    // 玻璃柜（透明 + 高光边缘）
+    ctx.strokeStyle = 'rgba(180,220,255,0.35)';
+    ctx.lineWidth = 1.2;
+    ctx.strokeRect(cx + 15.5, 380.5, 150, 174);
+    // 玻璃柜淡填充
+    ctx.fillStyle = 'rgba(150,200,240,0.06)';
+    ctx.fillRect(cx + 15, 380, 150, 174);
+    // 玻璃高光斜线
+    ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+    ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(x, 0); ctx.lineTo(x + 70, 0); ctx.lineTo(x + 210, H); ctx.lineTo(x + 140, H);
-    ctx.closePath(); ctx.fill();
-  }
-  ctx.restore();
-  // 远处观众剪影
-  for (let i = 0; i < 3; i++) {
-    const px = 420 + i * 380 - (cam.x * 0.8 % 380);
-    const bob = Math.sin(tGlobal * 0.9 + i) * 2;
-    ctx.fillStyle = 'rgba(10,14,20,0.55)';
+    ctx.moveTo(cx + 30, 385);
+    ctx.lineTo(cx + 100, 550);
+    ctx.stroke();
+
+    // 柜内射灯（顶部小射灯）
+    ctx.fillStyle = '#2a2018';
+    ctx.fillRect(cx + 15, 378, 150, 4);
+    ctx.fillStyle = 'rgba(255,240,200,0.9)';
+    ctx.fillRect(cx + 30, 380, 120, 1);
+
+    // 柜内射灯光斑
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const ig = ctx.createLinearGradient(cx + 90, 380, cx + 90, 555);
+    ig.addColorStop(0, 'rgba(255,240,200,0.28)');
+    ig.addColorStop(1, 'rgba(255,240,200,0)');
+    ctx.fillStyle = ig;
     ctx.beginPath();
-    ctx.ellipse(px, 520 + bob, 15, 18, 0, 0, Math.PI * 2);
+    ctx.moveTo(cx + 40, 382);
+    ctx.lineTo(cx + 140, 382);
+    ctx.lineTo(cx + 160, 555);
+    ctx.lineTo(cx + 20, 555);
+    ctx.closePath();
     ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(px - 17, 528 + bob); ctx.lineTo(px - 22, 620); ctx.lineTo(px + 22, 620);
-    ctx.lineTo(px + 17, 528 + bob); ctx.closePath(); ctx.fill();
+    ctx.restore();
+
+    // 展品（在柜内中央绘制）
+    ex.draw.call(ctx, cx + 90, 545);
+
+    // 说明牌（展台正面小铭牌）
+    ctx.fillStyle = '#d8c088';
+    ctx.fillRect(cx + 62, 588, 56, 16);
+    ctx.strokeStyle = '#3a2818';
+    ctx.lineWidth = 0.8;
+    ctx.strokeRect(cx + 62.5, 588.5, 55, 15);
+    ctx.fillStyle = '#1a0a00';
+    ctx.font = 'bold 8px "Microsoft YaHei", sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(ex.name, cx + 66, 596);
   }
+
+  // ---------- ⑦ 远处观众剪影（站在展柜旁驻足观看）----------
+  const viewerSpacing = 480;
+  const viewerStart = -((cam.x * 0.9) % viewerSpacing);
+  for (let i = 0; i < 4; i++) {
+    const vx = viewerStart + i * viewerSpacing + 260;
+    if (vx < -30 || vx > W + 30) continue;
+    const bob = Math.sin(tGlobal * 0.7 + i * 1.3) * 1.5;
+    // 头
+    ctx.fillStyle = 'rgba(8,10,16,0.85)';
+    ctx.beginPath();
+    ctx.ellipse(vx, 522 + bob, 10, 11, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // 身体（略前倾的姿态——抬头看展柜）
+    ctx.beginPath();
+    ctx.moveTo(vx - 12, 533 + bob);
+    ctx.lineTo(vx - 16, 620);
+    ctx.lineTo(vx + 16, 620);
+    ctx.lineTo(vx + 12, 533 + bob);
+    ctx.closePath();
+    ctx.fill();
+    // 举起的相机手臂（部分观众举相机拍照）
+    if (i % 2 === 0) {
+      ctx.fillRect(vx - 20, 545 + bob, 8, 3);
+      ctx.fillStyle = '#0a0a0a';
+      ctx.fillRect(vx - 22, 542 + bob, 4, 4);
+    }
+  }
+
+  // ---------- ⑧ 墙面馆名（超大字体，暗示"三星堆博物馆"字样）----------
+  ctx.save();
+  ctx.globalAlpha = 0.09;
+  ctx.fillStyle = '#c8a060';
+  ctx.font = 'bold 76px "Microsoft YaHei", sans-serif';
+  ctx.textBaseline = 'middle';
+  const hallStart = -((cam.x * 0.25) % 1600);
+  ctx.fillText('三 星 堆 博 物 馆', hallStart + 200, 130);
+  ctx.font = 'bold 26px "Microsoft YaHei", sans-serif';
+  ctx.globalAlpha = 0.08;
+  ctx.fillText('SANXINGDUI MUSEUM', hallStart + 300, 185);
+  ctx.restore();
+
+  // ---------- ⑨ 地面警戒线（黄黑相间，博物馆常见隔离）----------
+  for (let i = -1; i < 20; i++) {
+    const stripeX = i * 40 - ((cam.x * 0.9) % 40);
+    ctx.fillStyle = i % 2 === 0 ? 'rgba(220,180,50,0.15)' : 'rgba(0,0,0,0.3)';
+    ctx.fillRect(stripeX, 616, 40, 4);
+  }
+
+  // ---------- ⑦ 展厅地面（620 以下）：抛光大理石 + 反射光斑 ----------
+  const floorG = ctx.createLinearGradient(0, 620, 0, H);
+  floorG.addColorStop(0, '#0a0c12');
+  floorG.addColorStop(0.35, '#141821');
+  floorG.addColorStop(1, '#05070b');
+  ctx.fillStyle = floorG;
+  ctx.fillRect(0, 620, W, H - 620);
+  // 地面光泽高光（一条横向的高光带，暗示抛光地面反光）
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const shineG = ctx.createLinearGradient(0, 620, 0, 660);
+  shineG.addColorStop(0, 'rgba(255,240,200,0.12)');
+  shineG.addColorStop(1, 'rgba(255,240,200,0)');
+  ctx.fillStyle = shineG;
+  ctx.fillRect(0, 620, W, 40);
+  ctx.restore();
 }
 
 function drawBackground(theme) {
@@ -904,7 +2232,8 @@ function drawBackground(theme) {
 /* ================= 平台 ================= */
 function drawPlatforms() {
   const th = THEME[level.theme];
-  for (const pl of level.plats) {
+  for (let idx = 0; idx < level.plats.length; idx++) {
+    const pl = level.plats[idx];
     const px = pl[0] - cam.x, py = pl[1], pw = pl[2], ph = pl[3];
     if (px + pw < -40 || px > W + 40) continue;
 
@@ -938,17 +2267,640 @@ function drawPlatforms() {
       ctx.lineTo(px + pw, y);
       ctx.stroke();
     }
-    // 云雷纹饰带
-    ctx.strokeStyle = 'rgba(208,178,114,0.20)';
-    ctx.lineWidth = 1.4;
-    for (let x = 10; x < pw - 26; x += 30) {
-      ctx.beginPath();
-      ctx.moveTo(px + x, py + 24);
-      ctx.lineTo(px + x, py + 12);
-      ctx.lineTo(px + x + 13, py + 12);
-      ctx.lineTo(px + x + 13, py + 19);
-      ctx.stroke();
+    // 云雷纹饰带（其他主题主平台装饰）
+    if (ph > 60 && level.theme !== 'dig') {
+      ctx.strokeStyle = 'rgba(208,178,114,0.20)';
+      ctx.lineWidth = 1.4;
+      for (let x = 10; x < pw - 26; x += 30) {
+        ctx.beginPath();
+        ctx.moveTo(px + x, py + 24);
+        ctx.lineTo(px + x, py + 12);
+        ctx.lineTo(px + x + 13, py + 12);
+        ctx.lineTo(px + x + 13, py + 19);
+        ctx.stroke();
+      }
     }
+
+    // 第 4 关：给"踏面"小石板（非地面主平台）加上考古踏面标记
+    if (level.theme === 'dig' && ph <= 40) {
+      drawDigStepMarkers(px, py, pw, ph, pl[0], idx);
+    }
+    // 第 4 关：主平台（探方坑底/地表）加上现场考古符号
+    if (level.theme === 'dig' && ph > 60) {
+      drawDigGroundMarkers(px, py, pw, ph, pl[0], idx);
+    }
+  }
+}
+
+/* ================= 第 4 关 · 考古探方踏面标记 =================
+   叙事：第 4 关的高空小石板 = 探方坑壁上被考古队削出来的"发掘踏面"。
+   真实现场的核心符号：
+     - 探方编号：T02 / T03 之类（考古探方编号 = T + 两位数字）
+     - 白色测绘绳网：探方四角立竹桩，四角拉白绳，形成网格
+     - 竹桩：不是粗木柱，而是细竹竿（黄色）
+     - 洛阳铲 / 手铲：斜插在土面上的发掘工具
+     - 地层分色：黄土层→褐土层→红土层→黑土层（每层颜色不同）
+     - 陶片 / 青铜碎片：从土里露出小一角
+   玩家站在踏面上跳，就是在探方前沿踏面上按层跳跃。 */
+function drawDigStepMarkers(px, py, pw, ph, worldX, plIdx) {
+  // ---------- ① 分层土剖面：黄土→褐土→红土→黑土（考古地层标准色） ----------
+  const soilTop = py - 30;
+  const layers = [
+    { c: '#8a6a3a', h: 6 },   // 黄土层
+    { c: '#5a3f24', h: 7 },   // 褐土层
+    { c: '#7a4a28', h: 7 },   // 红土层
+    { c: '#3a2818', h: 10 }   // 黑土层
+  ];
+  let ly = soilTop;
+  for (const L of layers) {
+    ctx.fillStyle = L.c;
+    ctx.fillRect(px - 6, ly, pw + 12, L.h);
+    // 层间暗缝
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(px - 6, ly + L.h - 1, pw + 12, 1);
+    ly += L.h;
+  }
+  // 土面锯齿边（最顶层的未铲平自然土面）
+  ctx.fillStyle = '#8a6a3a';
+  ctx.beginPath();
+  ctx.moveTo(px - 6, soilTop);
+  for (let x = px - 6; x <= px + pw + 6; x += 10) {
+    const jag = ((x * 7919) % 5) - 2;
+    ctx.lineTo(x, soilTop + jag);
+  }
+  ctx.lineTo(px + pw + 6, soilTop + 4);
+  ctx.lineTo(px - 6, soilTop + 4);
+  ctx.closePath();
+  ctx.fill();
+  // 土里的碎屑/石子
+  for (let i = 0; i < 14; i++) {
+    const sx = px + ((i * 37 + plIdx * 13) % (pw - 8));
+    const sy = soilTop + 3 + ((i * 11) % (soilTop - py + 26));
+    const col = (i + plIdx) % 3 === 0 ? 'rgba(220,180,120,0.6)'
+              : (i + plIdx) % 3 === 1 ? 'rgba(60,40,20,0.7)'
+              : 'rgba(140,100,60,0.5)';
+    ctx.fillStyle = col;
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+
+  // ---------- ② 探方编号木牌 + 竹竿（挂在探方左端） ----------
+  const poleX = px - 8;
+  const poleTopY = soilTop - 26;
+  const poleBotY = soilTop + 2;
+  // 竹竿（黄色 + 竹节）
+  const poleG = ctx.createLinearGradient(poleX, 0, poleX + 4, 0);
+  poleG.addColorStop(0, '#a88850');
+  poleG.addColorStop(0.5, '#d0ac70');
+  poleG.addColorStop(1, '#8a6a38');
+  ctx.fillStyle = poleG;
+  ctx.fillRect(poleX, poleTopY, 4, poleBotY - poleTopY);
+  // 竹节
+  ctx.fillStyle = '#6b4e20';
+  for (let ny = poleTopY + 6; ny < poleBotY - 2; ny += 6) {
+    ctx.fillRect(poleX, ny, 4, 1);
+  }
+  // 探方编号木牌（黄色底 + 黑色编号 = 考古标准做法）
+  const codes = ['T02', 'T03', 'T04', 'T05'];
+  const code = codes[plIdx % codes.length];
+  const lbW = 26, lbH = 16;
+  const lbX = poleX - 3, lbY = poleTopY + 1;
+  ctx.fillStyle = '#f0d896';
+  ctx.fillRect(lbX, lbY, lbW, lbH);
+  ctx.strokeStyle = '#3a2818';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(lbX + 0.5, lbY + 0.5, lbW - 1, lbH - 1);
+  ctx.fillStyle = '#1a0a00';
+  ctx.font = 'bold 11px Consolas, monospace';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(code, lbX + 3, lbY + lbH / 2 + 1);
+
+  // ---------- ③ 白色测绘绳网：探方四角拉白绳（横+竖） ----------
+  // 横绳：沿踏面上沿延伸，形成"探方边界线"
+  ctx.strokeStyle = 'rgba(255,250,220,0.85)';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(px - 22, soilTop - 4);
+  ctx.lineTo(px + pw + 22, soilTop - 4);
+  ctx.stroke();
+  // 竖绳：在踏面两端垂下一小段（暗示继续向下延伸进坑）
+  ctx.strokeStyle = 'rgba(255,250,220,0.7)';
+  ctx.beginPath();
+  ctx.moveTo(px - 22, soilTop - 4);
+  ctx.lineTo(px - 22, soilTop + 30);
+  ctx.moveTo(px + pw + 22, soilTop - 4);
+  ctx.lineTo(px + pw + 22, soilTop + 30);
+  ctx.stroke();
+  // 中间还有一根竖绳（把探方再分一格）
+  ctx.beginPath();
+  ctx.moveTo(px + pw / 2, soilTop - 4);
+  ctx.lineTo(px + pw / 2, soilTop + 30);
+  ctx.stroke();
+
+  // ---------- ④ 右端竹桩（另一根，形成"探方四角立桩"的感觉） ----------
+  const pole2X = px + pw + 4;
+  ctx.fillStyle = '#d0ac70';
+  ctx.fillRect(pole2X, poleTopY + 4, 4, poleBotY - poleTopY);
+  ctx.fillStyle = '#6b4e20';
+  for (let ny = poleTopY + 10; ny < poleBotY - 2; ny += 6) {
+    ctx.fillRect(pole2X, ny, 4, 1);
+  }
+
+  // ---------- ⑤ 手铲（洛阳铲）：斜插在踏面右端土上 ----------
+  const shX = px + pw - 12;
+  const shY = soilTop + 2;
+  ctx.save();
+  ctx.translate(shX, shY);
+  ctx.rotate(-0.35);
+  // 木柄
+  const hG = ctx.createLinearGradient(0, 0, 0, 18);
+  hG.addColorStop(0, '#7a5830');
+  hG.addColorStop(1, '#4a3018');
+  ctx.fillStyle = hG;
+  ctx.fillRect(-2, 0, 4, 18);
+  // 铲头（梯形金属头）
+  const bG = ctx.createLinearGradient(-8, 0, 8, 0);
+  bG.addColorStop(0, '#4a4a52');
+  bG.addColorStop(0.5, '#888890');
+  bG.addColorStop(1, '#3a3a42');
+  ctx.fillStyle = bG;
+  ctx.beginPath();
+  ctx.moveTo(-8, 18);
+  ctx.lineTo(8, 18);
+  ctx.lineTo(5, 26);
+  ctx.lineTo(-5, 26);
+  ctx.closePath();
+  ctx.fill();
+  // 铲头锈痕
+  ctx.fillStyle = 'rgba(120,60,20,0.5)';
+  ctx.fillRect(-6, 19, 12, 2);
+  ctx.restore();
+
+  // ---------- ⑥ 探方坑壁下的陶片 & 青铜碎片（露出小一角） ----------
+  // 陶片（褐红色破片）
+  ctx.fillStyle = '#a05a30';
+  ctx.beginPath();
+  ctx.moveTo(px + 12, py + 4);
+  ctx.lineTo(px + 20, py + 2);
+  ctx.lineTo(px + 22, py + 8);
+  ctx.lineTo(px + 14, py + 9);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+  ctx.lineWidth = 0.8;
+  ctx.stroke();
+  // 青铜碎片（绿锈色）
+  ctx.fillStyle = '#4a8a6a';
+  ctx.beginPath();
+    ctx.moveTo(px + pw - 24, py + 6);
+    ctx.lineTo(px + pw - 16, py + 3);
+    ctx.lineTo(px + pw - 14, py + 10);
+    ctx.lineTo(px + pw - 22, py + 11);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+    ctx.stroke();
+}
+
+/* ================= 第 4 关 · 探方坑底/地表现场符号 =================
+   真实现场的关键细节：
+   - 探方四角立竹桩 + 探方编号木牌（T01/T02/…）
+   - 白色测绘绳网（1米/格的网格拉在白绳上）
+   - 探方边缘堆积的翻出土（松散碎土）
+   - 蹲着铲土的考古员剪影（拿手铲+草帽）
+   - 竹编土筐（挖出土的临时容器）
+   - 麻袋 + 记录本 + 皮尺
+   - 探方坑底的网格线（1米×1米） */
+function drawDigGroundMarkers(px, py, pw, ph, worldX, plIdx) {
+  // 用世界坐标生成稳定的伪随机
+  const seed = plIdx * 1013 + 7;
+  const rr = (i, m) => ((Math.sin(seed * 17 + i * 31.7) * 10000) % m + m) % m;
+
+  // ---------- ① 探方边缘：堆积的翻出土（松散碎土堆） ----------
+  // 在探方上沿（py 位置）堆一堆翻出来的松土，模拟"探方边土堆"
+  // 分两段，中间挖出缺口给考古员站位
+  ctx.fillStyle = '#7a5836';
+  ctx.beginPath();
+  ctx.moveTo(px, py + 6);
+  const bumps = 24;
+  for (let i = 0; i <= bumps; i++) {
+    const t = i / bumps;
+    const bx = px + t * pw;
+    // 土堆高度：中间略高，但在人物站位处压低
+    let centerDip = Math.sin(t * Math.PI);
+    // 为每个考古员站位位置压低土堆
+    const workerCountPre = (pw > 400) ? 2 : 1;
+    for (let wi = 0; wi < workerCountPre; wi++) {
+      const wt = (160 + wi * (pw / (workerCountPre + 1))) / pw;
+      const distToWorker = Math.abs(t - wt);
+      if (distToWorker < 0.06) {
+        centerDip *= (distToWorker / 0.06) * 0.4;
+      }
+    }
+    const jag = Math.sin(t * 22 + plIdx) * 1.5 + Math.sin(t * 7 + plIdx * 2) * 2;
+    const h = 6 + centerDip * 10 + jag;
+    ctx.lineTo(bx, py - h);
+  }
+  ctx.lineTo(px + pw, py + 6);
+  ctx.closePath();
+  ctx.fill();
+  // 土堆表面的颗粒
+  for (let i = 0; i < 40; i++) {
+    const t = i / 40;
+    const bx = px + t * pw;
+    let centerDip = Math.sin(t * Math.PI);
+    const workerCountPre = (pw > 400) ? 2 : 1;
+    for (let wi = 0; wi < workerCountPre; wi++) {
+      const wt = (160 + wi * (pw / (workerCountPre + 1))) / pw;
+      const distToWorker = Math.abs(t - wt);
+      if (distToWorker < 0.06) centerDip *= (distToWorker / 0.06) * 0.4;
+    }
+    const h = 6 + centerDip * 10 + Math.sin(t * 22 + plIdx) * 1.5;
+    ctx.fillStyle = (i % 3 === 0) ? 'rgba(200,150,90,0.55)'
+                  : (i % 3 === 1) ? 'rgba(60,40,20,0.7)'
+                  : 'rgba(140,100,60,0.6)';
+    ctx.fillRect(bx, py - h + rr(i, 4), 2, 2);
+  }
+
+  // ---------- ② 探方坑底网格（1米×1米白绳网格） ----------
+  // 横向白绳：3 根
+  ctx.strokeStyle = 'rgba(255,250,220,0.42)';
+  ctx.lineWidth = 1.2;
+  for (let i = 1; i <= 3; i++) {
+    const yy = py + 40 + i * 22;
+    ctx.beginPath();
+    ctx.moveTo(px + 8, yy);
+    ctx.lineTo(px + pw - 8, yy);
+    ctx.stroke();
+  }
+  // 纵向白绳：把探方分成 4 段
+  ctx.strokeStyle = 'rgba(255,250,220,0.35)';
+  ctx.lineWidth = 1.1;
+  for (let i = 1; i < 4; i++) {
+    const xx = px + i * (pw / 4);
+    ctx.beginPath();
+    ctx.moveTo(xx, py + 20);
+    ctx.lineTo(xx, py + ph - 10);
+    ctx.stroke();
+  }
+  // 网格交叉点：小小的绳结
+  ctx.fillStyle = 'rgba(255,250,220,0.7)';
+  for (let i = 1; i <= 3; i++) {
+    for (let j = 1; j < 4; j++) {
+      const gx = px + j * (pw / 4);
+      const gy = py + 40 + i * 22;
+      ctx.fillRect(gx - 1, gy - 1, 2, 2);
+    }
+  }
+
+  // ---------- ③ 探方编号（沿探方边界挂的编号木牌） ----------
+  // 每个主平台都编号，T01 T02 T03 T04
+  const gridCode = ['T01', 'T02', 'T03', 'T04'][plIdx % 4];
+  // 左端探方编号牌
+  const lbX1 = px + 10, lbY1 = py + 30;
+  ctx.fillStyle = '#f0d896';
+  ctx.fillRect(lbX1, lbY1, 32, 16);
+  ctx.strokeStyle = '#3a2818';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(lbX1 + 0.5, lbY1 + 0.5, 31, 15);
+  ctx.fillStyle = '#1a0a00';
+  ctx.font = 'bold 11px Consolas, monospace';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(gridCode, lbX1 + 4, lbY1 + 9);
+  // 挂绳
+  ctx.strokeStyle = 'rgba(30,20,10,0.6)';
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(lbX1 + 16, py - 8);
+  ctx.lineTo(lbX1 + 16, lbY1);
+  ctx.stroke();
+
+  // ---------- ④ 探方四角立竹桩 ----------
+  const poleG = ctx.createLinearGradient(0, 0, 6, 0);
+  poleG.addColorStop(0, '#a88850');
+  poleG.addColorStop(0.5, '#d0ac70');
+  poleG.addColorStop(1, '#7a5c30');
+  // 左端 + 右端竹桩（探方边界标记）
+  for (const poleOff of [4, pw - 10]) {
+    const poleX = px + poleOff;
+    const poleTopY = py - 32;
+    ctx.fillStyle = poleG;
+    ctx.fillRect(poleX, poleTopY, 6, 40);
+    // 竹节
+    ctx.fillStyle = '#5c4020';
+    for (let ny = poleTopY + 6; ny < poleTopY + 40; ny += 8) {
+      ctx.fillRect(poleX, ny, 6, 1);
+    }
+  }
+
+  // ---------- ⑤ 蹲着的考古员剪影（放大 + 描边 + 高光，一眼能看清） ----------
+  // 每段平台最多放 2 个
+  const workerCount = (pw > 400) ? 2 : 1;
+  for (let i = 0; i < workerCount; i++) {
+    const wx = px + 160 + i * (pw / (workerCount + 1));
+    const wy = py + 14;
+    const hasTool = (plIdx + i) % 2 === 0; // 交替拿手铲/刷子
+    const facingLeft = (plIdx + i) % 2 === 1; // 交替朝向
+
+    ctx.save();
+    // 人物光晕（暖色阳光打在背上，让人物从土色背景中跳出来）
+    const halo = ctx.createRadialGradient(wx, wy - 22, 4, wx, wy - 22, 34);
+    halo.addColorStop(0, 'rgba(255,230,170,0.35)');
+    halo.addColorStop(1, 'rgba(255,230,170,0)');
+    ctx.fillStyle = halo;
+    ctx.beginPath();
+    ctx.arc(wx, wy - 22, 34, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // 阴影（地面投影）
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.beginPath();
+    ctx.ellipse(wx, wy + 8, 22, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.save();
+    if (facingLeft) {
+      ctx.translate(wx, 0);
+      ctx.scale(-1, 1);
+      ctx.translate(-wx, 0);
+    }
+
+    const bodyFill = '#1a1008';
+    const bodyEdge = 'rgba(255,235,200,0.75)';
+    const bodyEdgeW = 1.4;
+
+    // 双腿（蹲姿，画在上身之前避免遮挡）
+    ctx.fillStyle = '#0e0804';
+    ctx.beginPath();
+    // 左腿（大腿+膝盖+小腿，蹲姿）
+    ctx.moveTo(wx - 10, wy - 8);
+    ctx.lineTo(wx - 4, wy - 14);
+    ctx.lineTo(wx + 4, wy - 12);
+    ctx.lineTo(wx + 8, wy - 4);
+    ctx.lineTo(wx + 12, wy);
+    ctx.lineTo(wx - 14, wy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = bodyEdge;
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+    // 脚（靴子）
+    ctx.fillStyle = '#0a0604';
+    ctx.fillRect(wx - 14, wy - 2, 8, 4);
+    ctx.fillRect(wx + 4, wy - 2, 8, 4);
+
+    // 上身（蹲姿俯身，梯形）
+    ctx.fillStyle = bodyFill;
+    ctx.beginPath();
+    ctx.moveTo(wx - 10, wy - 22);
+    ctx.lineTo(wx + 12, wy - 24);   // 肩膀（前倾）
+    ctx.lineTo(wx + 18, wy - 12);  // 手肘
+    ctx.lineTo(wx + 14, wy - 6);   // 前伸的手
+    ctx.lineTo(wx + 4, wy - 8);    // 腹前
+    ctx.lineTo(wx - 4, wy - 8);
+    ctx.lineTo(wx - 12, wy - 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = bodyEdge;
+    ctx.lineWidth = 1.1;
+    ctx.stroke();
+
+    // 后脑勺
+    ctx.fillStyle = bodyFill;
+    ctx.beginPath();
+    ctx.arc(wx + 8, wy - 28, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = bodyEdge;
+    ctx.lineWidth = 1.1;
+    ctx.stroke();
+
+    // 草帽（大圆帽檐 + 高帽顶）
+    ctx.fillStyle = '#d4b070';
+    ctx.beginPath();
+    ctx.ellipse(wx + 8, wy - 32, 16, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#3a2818';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    // 帽顶（圆锥）
+    ctx.fillStyle = '#e0c088';
+    ctx.beginPath();
+    ctx.moveTo(wx + 2, wy - 32);
+    ctx.lineTo(wx + 14, wy - 32);
+    ctx.lineTo(wx + 12, wy - 40);
+    ctx.lineTo(wx + 4, wy - 40);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#3a2818';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    // 帽顶高光
+    ctx.fillStyle = 'rgba(255,240,200,0.6)';
+    ctx.fillRect(wx + 6, wy - 40, 4, 1.5);
+    // 帽带（红色醒目）
+    ctx.fillStyle = '#c0392b';
+    ctx.fillRect(wx + 4, wy - 34, 8, 2);
+
+    // 前伸的手臂 + 工具
+    if (hasTool) {
+      // 手铲：木柄 + 金属头（斜插在土里）
+      ctx.save();
+      ctx.translate(wx + 20, wy - 8);
+      ctx.rotate(-0.55);
+      // 手臂（从手肘伸出）
+      ctx.fillStyle = bodyFill;
+      ctx.fillRect(-1, -8, 3, 10);
+      // 手铲柄
+      ctx.fillStyle = '#6a4a24';
+      ctx.fillRect(-1.5, 0, 3, 14);
+      // 手铲头（梯形金属）
+      ctx.fillStyle = '#8a8a92';
+      ctx.beginPath();
+      ctx.moveTo(-5, 14); ctx.lineTo(5, 14);
+      ctx.lineTo(3.5, 20); ctx.lineTo(-3.5, 20);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#2a2a32';
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+      // 金属反光
+      ctx.fillStyle = 'rgba(255,255,255,0.3)';
+      ctx.fillRect(-3, 15, 6, 1);
+      ctx.restore();
+    } else {
+      // 毛刷：短柄 + 白色毛束
+      ctx.save();
+      ctx.translate(wx + 20, wy - 8);
+      ctx.rotate(0.4);
+      // 手臂
+      ctx.fillStyle = bodyFill;
+      ctx.fillRect(-1, -8, 3, 10);
+      // 刷柄
+      ctx.fillStyle = '#6a4a24';
+      ctx.fillRect(-1.5, 0, 3, 10);
+      // 毛束（浅色）
+      ctx.fillStyle = '#f0e8d0';
+      ctx.fillRect(-4, 10, 8, 4);
+      // 毛束细丝
+      ctx.fillStyle = '#c8b888';
+      for (let b = -4; b <= 4; b += 2) {
+        ctx.fillRect(b, 14, 0.8, 3);
+      }
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  // ---------- ⑥ 竹编土筐 ----------
+  // 探方边土堆旁放竹筐（挖出土的临时容器）
+  const basketX = px + pw - 90;
+  const basketY = py + 24;
+  // 筐体（梯形，竹条纹理）
+  ctx.fillStyle = '#7a5830';
+  ctx.beginPath();
+  ctx.moveTo(basketX, basketY - 14);
+  ctx.lineTo(basketX + 40, basketY - 14);
+  ctx.lineTo(basketX + 34, basketY + 8);
+  ctx.lineTo(basketX + 6, basketY + 8);
+  ctx.closePath();
+  ctx.fill();
+  // 竹条竖纹
+  ctx.strokeStyle = 'rgba(30,20,10,0.5)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 6; i++) {
+    const bx = basketX + 4 + i * 6.5;
+    ctx.beginPath();
+    ctx.moveTo(bx, basketY - 14);
+    ctx.lineTo(bx + 1, basketY + 8);
+    ctx.stroke();
+  }
+  // 竹条横纹
+  for (let i = 0; i < 3; i++) {
+    const by = basketY - 10 + i * 6;
+    ctx.beginPath();
+    ctx.moveTo(basketX + 2 + i, by);
+    ctx.lineTo(basketX + 38 - i, by);
+    ctx.stroke();
+  }
+  // 筐沿（竹条压边）
+  ctx.fillStyle = '#5c3e1a';
+  ctx.fillRect(basketX - 2, basketY - 16, 44, 3);
+  // 筐里的土（松散黄土）
+  ctx.fillStyle = '#9a7040';
+  ctx.beginPath();
+  ctx.moveTo(basketX + 2, basketY - 14);
+  ctx.lineTo(basketX + 12, basketY - 18);
+  ctx.lineTo(basketX + 20, basketY - 14);
+  ctx.lineTo(basketX + 30, basketY - 20);
+  ctx.lineTo(basketX + 38, basketY - 14);
+  ctx.lineTo(basketX + 40, basketY - 14);
+  ctx.lineTo(basketX, basketY - 14);
+  ctx.closePath();
+  ctx.fill();
+  // 筐里的土颗粒
+  ctx.fillStyle = 'rgba(60,40,20,0.6)';
+  for (let i = 0; i < 6; i++) {
+    ctx.fillRect(basketX + 4 + i * 6, basketY - 15 - (i % 2) * 3, 1, 1);
+  }
+
+  // ---------- ⑦ 麻袋 ----------
+  const sackX = px + 60;
+  const sackY = py + 20;
+  ctx.fillStyle = '#6a5030';
+  ctx.beginPath();
+  ctx.moveTo(sackX, sackY);
+  ctx.lineTo(sackX + 26, sackY);
+  ctx.lineTo(sackX + 22, sackY - 24);
+  ctx.lineTo(sackX + 4, sackY - 24);
+  ctx.closePath();
+  ctx.fill();
+  // 袋口
+  ctx.fillStyle = '#4a3018';
+  ctx.fillRect(sackX + 4, sackY - 26, 18, 4);
+  // 麻袋纹理
+  ctx.strokeStyle = 'rgba(30,20,10,0.4)';
+  ctx.lineWidth = 0.8;
+  for (let i = 1; i < 4; i++) {
+    ctx.beginPath();
+    ctx.moveTo(sackX + 2, sackY - 4 - i * 5);
+    ctx.lineTo(sackX + 24, sackY - 4 - i * 5);
+    ctx.stroke();
+  }
+
+  // ---------- ⑧ 记录本 + 皮尺（散落在踏面/主平台边缘） ----------
+  // 记录本（白色本 + 黑线）
+  ctx.fillStyle = '#e8e0c8';
+  ctx.fillRect(px + pw * 0.55, py + 12, 18, 12);
+  ctx.strokeStyle = '#3a2818';
+  ctx.lineWidth = 0.6;
+  ctx.strokeRect(px + pw * 0.55, py + 12, 18, 12);
+  ctx.strokeStyle = 'rgba(30,20,10,0.5)';
+  for (let i = 1; i < 4; i++) {
+    ctx.beginPath();
+    ctx.moveTo(px + pw * 0.55 + 2, py + 14 + i * 2.5);
+    ctx.lineTo(px + pw * 0.55 + 16, py + 14 + i * 2.5);
+    ctx.stroke();
+  }
+  // 笔
+  ctx.fillStyle = '#c8a030';
+  ctx.fillRect(px + pw * 0.55 + 20, py + 15, 10, 2);
+  ctx.fillStyle = '#2a1810';
+  ctx.fillRect(px + pw * 0.55 + 28, py + 15, 2, 2);
+
+  // ---------- ⑨ 探方边缘散落的小陶片 & 青铜碎片 ----------
+  // 每段平台 2-3 个
+  const fragCount = 3;
+  for (let i = 0; i < fragCount; i++) {
+    const fx = px + 40 + ((plIdx * 53 + i * 137) % (pw - 60));
+    const fy = py + 40 + ((plIdx * 31 + i * 61) % (ph - 60));
+    const type = (plIdx + i) % 3;
+    if (type === 0) {
+      // 陶片（褐红）
+      ctx.fillStyle = '#a05a30';
+      ctx.beginPath();
+      ctx.moveTo(fx, fy); ctx.lineTo(fx + 8, fy - 2);
+      ctx.lineTo(fx + 10, fy + 3); ctx.lineTo(fx + 3, fy + 5);
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+      ctx.lineWidth = 0.6;
+      ctx.stroke();
+    } else if (type === 1) {
+      // 青铜碎片（绿锈）
+      ctx.fillStyle = '#4a8a6a';
+      ctx.beginPath();
+      ctx.moveTo(fx, fy); ctx.lineTo(fx + 10, fy - 3);
+      ctx.lineTo(fx + 12, fy + 2); ctx.lineTo(fx + 4, fy + 4);
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+      ctx.lineWidth = 0.6;
+      ctx.stroke();
+    } else {
+      // 石子
+      ctx.fillStyle = 'rgba(80,60,40,0.6)';
+      ctx.beginPath();
+      ctx.arc(fx, fy, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // ---------- ⑩ 探方口边缘红绳警戒线 ----------
+  // 探方边界沿坑壁顶沿拉一条红绳（警戒线）
+  ctx.strokeStyle = 'rgba(180,60,50,0.55)';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([8, 5]);
+  ctx.beginPath();
+  ctx.moveTo(px, py - 4);
+  ctx.lineTo(px + pw, py - 4);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // 木桩（沿探方边界，每 40px 一根）
+  for (let i = 0; i < pw; i += 40) {
+    const pX = px + i;
+    ctx.fillStyle = '#3a2818';
+    ctx.fillRect(pX, py - 10, 4, 10);
+    ctx.fillStyle = 'rgba(255,220,180,0.4)';
+    ctx.fillRect(pX, py - 10, 4, 2);
   }
 }
 
@@ -1095,60 +3047,370 @@ function drawHazards() {
   for (const h of haz) {
     if (h.t === 'laser') {
       const cx = (h.cur === undefined ? h.x0 : h.cur) - cam.x;
-      // 光柱
+      const ceilY = h.y - 60;   // 灯头所在天花板面
+      const lensY = ceilY + 18; // 灯头底部（光束从这里射出）
+      const groundY = h.y + h.hgt;
+      const beamH = groundY - lensY;
+      const halfTop = 10, halfBot = 32; // 灯口窄 → 地面宽
+
+      // ---------- 天花板轨道 ----------
+      ctx.fillStyle = 'rgba(8,6,4,0.6)';
+      ctx.fillRect(cx - 74, ceilY - 6, 148, 6);
+      ctx.fillStyle = 'rgba(30,22,14,0.9)';
+      ctx.fillRect(cx - 70, ceilY - 2, 140, 2);
+
+      // ---------- 灯体：导轨卡扣 → 灯筒 → 灯头 ----------
+      // 卡扣
+      ctx.fillStyle = '#2a2418';
+      ctx.fillRect(cx - 3, ceilY - 4, 6, 6);
+      // 短颈
+      ctx.fillStyle = '#3a3226';
+      ctx.fillRect(cx - 2, ceilY + 2, 4, 6);
+      // 灯筒（深色金属圆柱，从侧视角是矩形）
+      const bodyG = ctx.createLinearGradient(cx - 16, 0, cx + 16, 0);
+      bodyG.addColorStop(0, '#0f0b08');
+      bodyG.addColorStop(0.35, '#4a3d2c');
+      bodyG.addColorStop(0.55, '#6a5942');
+      bodyG.addColorStop(1, '#140f0a');
+      ctx.fillStyle = bodyG;
+      ctx.fillRect(cx - 16, ceilY + 8, 32, 18);
+      // 灯筒下缘
+      ctx.fillStyle = '#1a140d';
+      ctx.fillRect(cx - 18, ceilY + 25, 36, 3);
+      // 灯头（发光的玻璃透镜）
+      const lensG = ctx.createRadialGradient(cx, ceilY + 27, 1, cx, ceilY + 27, 14);
+      lensG.addColorStop(0, 'rgba(255,252,220,1)');
+      lensG.addColorStop(0.45, 'rgba(255,232,160,0.9)');
+      lensG.addColorStop(1, 'rgba(255,180,60,0)');
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
-      const g = ctx.createLinearGradient(cx - h.w, 0, cx + h.w, 0);
-      g.addColorStop(0, 'rgba(255,235,180,0)');
-      g.addColorStop(0.5, 'rgba(255,235,180,0.30)');
-      g.addColorStop(1, 'rgba(255,235,180,0)');
-      ctx.fillStyle = g;
-      ctx.fillRect(cx - h.w, h.y, h.w * 2, h.hgt);
+      ctx.fillStyle = lensG;
+      ctx.beginPath();
+      ctx.ellipse(cx, ceilY + 27, 13, 5.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,240,0.95)';
+      ctx.beginPath();
+      ctx.ellipse(cx, ceilY + 26.5, 5, 2, 0, 0, Math.PI * 2);
+      ctx.fill();
       ctx.restore();
-      ctx.fillStyle = 'rgba(255,246,210,0.55)';
-      ctx.fillRect(cx - h.w * 0.34, h.y, h.w * 0.68, h.hgt);
-      // 地面光斑
+
+      // ---------- 体积光锥（灯口 → 地面，上窄下宽） ----------
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
-      radialGlow(cx, h.y + h.hgt, 90, 'rgba(255,235,170,0.16)');
+      // 外层柔光
+      const coneG1 = ctx.createLinearGradient(0, lensY, 0, groundY);
+      coneG1.addColorStop(0, 'rgba(255,240,180,0.65)');
+      coneG1.addColorStop(0.5, 'rgba(255,220,140,0.28)');
+      coneG1.addColorStop(1, 'rgba(255,200,100,0.08)');
+      ctx.fillStyle = coneG1;
+      ctx.beginPath();
+      ctx.moveTo(cx - halfTop, lensY);
+      ctx.lineTo(cx + halfTop, lensY);
+      ctx.lineTo(cx + halfBot, groundY);
+      ctx.lineTo(cx - halfBot, groundY);
+      ctx.closePath();
+      ctx.fill();
+      // 中间层核心亮
+      const coneG2 = ctx.createLinearGradient(0, lensY, 0, groundY);
+      coneG2.addColorStop(0, 'rgba(255,252,220,0.9)');
+      coneG2.addColorStop(0.5, 'rgba(255,236,170,0.5)');
+      coneG2.addColorStop(1, 'rgba(255,220,140,0.18)');
+      ctx.fillStyle = coneG2;
+      ctx.beginPath();
+      ctx.moveTo(cx - 4, lensY);
+      ctx.lineTo(cx + 4, lensY);
+      ctx.lineTo(cx + 10, groundY);
+      ctx.lineTo(cx - 10, groundY);
+      ctx.closePath();
+      ctx.fill();
+      // 光束内空气尘埃（3 层视差漂浮）
+      for (let k = 0; k < 14; k++) {
+        const tt = ((tGlobal * 0.35 + k * 0.19) % 1 + 1) % 1;
+        const y = lensY + tt * beamH;
+        const halfHere = halfTop + (halfBot - halfTop) * tt;
+        const dx = Math.sin(k * 2.31 + tGlobal * 0.9) * halfHere * 0.75;
+        const alpha = (1 - Math.abs(tt - 0.5) * 2) * 0.6;
+        ctx.fillStyle = `rgba(255,240,190,${alpha})`;
+        ctx.beginPath();
+        ctx.arc(cx + dx, y, 1.1, 0, Math.PI * 2);
+        ctx.fill();
+      }
       ctx.restore();
+
+      // ---------- 地面光池 ----------
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const poolG = ctx.createRadialGradient(cx, groundY, 4, cx, groundY, 68);
+      poolG.addColorStop(0, 'rgba(255,244,200,0.6)');
+      poolG.addColorStop(0.5, 'rgba(255,210,130,0.22)');
+      poolG.addColorStop(1, 'rgba(255,180,80,0)');
+      ctx.fillStyle = poolG;
+      ctx.beginPath();
+      ctx.ellipse(cx, groundY, 70, 14, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
       continue;
     }
 
     if (h.t === 'rock') {
-      const cx = h.x - cam.x, cy = h.cx === undefined ? h.yTop : h.cx;
-      if (h.warning) {
-        // 预警：地面闪烁圈 + 落点虚线
-        const f = 0.35 + 0.65 * Math.abs(Math.sin(tGlobal * 12));
-        ctx.strokeStyle = `rgba(255,120,60,${f})`;
-        ctx.lineWidth = 2.5;
-        ctx.setLineDash([8, 7]);
+      const phase = h.phase || 'idle';
+      const phaseP = h.phaseP || 0;
+      const cyWorld = h.cx === undefined ? h.yTop : h.cx;
+      const cx = h.x - cam.x, cy = cyWorld;
+
+      // ---------- 撞击后坑痕（持续几秒才渐隐） ----------
+      if (h.pit) {
+        const pitA = h.pit.life > 3.0 ? 0.42 : (h.pit.life / 3.0) * 0.42;
+        const pxA = h.pit.x - cam.x;
+        // 外圈浅凹（暗色）
+        ctx.fillStyle = `rgba(20,14,8,${pitA})`;
         ctx.beginPath();
-        ctx.moveTo(cx, cy + h.size * 0.4);
-        ctx.lineTo(cx, h.gy);
-        ctx.stroke();
-        ctx.setLineDash([]);
+        ctx.ellipse(pxA, h.gy - 2, h.size * 0.55, 8, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // 内圈更暗
+        ctx.fillStyle = `rgba(10,6,4,${pitA * 1.1})`;
         ctx.beginPath();
-        ctx.ellipse(cx, h.gy - 4, h.size * 0.62, 11, 0, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(255,120,60,${f * 0.9})`;
-        ctx.stroke();
+        ctx.ellipse(pxA, h.gy - 3, h.size * 0.32, 5, 0, 0, Math.PI * 2);
+        ctx.fill();
       }
-      // 土块
-      ctx.save();
-      ctx.fillStyle = h.firing ? '#6b5638' : 'rgba(70,56,38,0.85)';
-      ctx.beginPath();
-      ctx.moveTo(cx - h.size / 2, cy);
-      ctx.lineTo(cx - h.size * 0.3, cy - h.size * 0.55);
-      ctx.lineTo(cx + h.size * 0.34, cy - h.size * 0.5);
-      ctx.lineTo(cx + h.size / 2, cy + h.size * 0.1);
-      ctx.lineTo(cx + h.size * 0.16, cy + h.size * 0.5);
-      ctx.lineTo(cx - h.size * 0.36, cy + h.size * 0.44);
-      ctx.closePath();
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(20,14,8,0.6)';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.restore();
+
+      // ---------- 扬尘（撞击瞬间散开） ----------
+      if (h.dust) {
+        for (const d of h.dust) {
+          const a = Math.max(0, 1 - d.t / d.life) * 0.6;
+          ctx.fillStyle = `rgba(200,170,120,${a})`;
+          ctx.beginPath();
+          ctx.arc(d.x - cam.x, d.y, d.s, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      // ---------- 碎片（撞击后飞出的小土块 & 主残块） ----------
+      if (h.shards) {
+        for (const sd of h.shards) {
+          const a = Math.max(0, 1 - sd.t / sd.life);
+          ctx.save();
+          ctx.translate(sd.x - cam.x, sd.y);
+          ctx.rotate(sd.rot);
+          ctx.globalAlpha = a;
+          if (sd.main && sd.shape) {
+            // 主残块：用原始 rock 的随机形状（等比缩小）
+            const ss = sd.s / 2;
+            ctx.fillStyle = '#6b5638';
+            ctx.beginPath();
+            for (let i = 0; i < sd.shape.length; i++) {
+              const p = sd.shape[i];
+              if (i === 0) ctx.moveTo(p.x * ss, p.y * ss); else ctx.lineTo(p.x * ss, p.y * ss);
+            }
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(20,14,8,0.7)';
+            ctx.lineWidth = 1.6;
+            ctx.stroke();
+            // 裂纹
+            ctx.strokeStyle = 'rgba(20,14,8,0.6)';
+            ctx.lineWidth = 0.9;
+            for (const cr of (sd.cracks || [])) {
+              ctx.beginPath();
+              ctx.moveTo(cr.x0 * ss, cr.y0 * ss);
+              ctx.lineTo(cr.x1 * ss, cr.y1 * ss);
+              ctx.stroke();
+            }
+          } else {
+            // 小碎片：不规则方形
+            const sz = sd.s;
+            ctx.fillStyle = '#6b5638';
+            ctx.beginPath();
+            ctx.moveTo(-sz * 0.5, -sz * 0.4);
+            ctx.lineTo( sz * 0.45, -sz * 0.5);
+            ctx.lineTo( sz * 0.55,  sz * 0.35);
+            ctx.lineTo(-sz * 0.35,  sz * 0.5);
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(20,14,8,0.7)';
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      // ---------- precursor：暖土色地面暗影（去游戏 UI 橙红圈） + 边缘碎屑先兆 ----------
+      if (phase === 'precursor') {
+        const f = phaseP; // 0→1
+        // 地面暗影（暖土色，随 phaseP 加深）
+        const grdA = 0.18 + f * 0.32;
+        const grd = ctx.createRadialGradient(cx, h.gy - 3, 2, cx, h.gy - 3, h.size * 0.7);
+        grd.addColorStop(0, `rgba(140,100,58,${grdA})`);
+        grd.addColorStop(1, 'rgba(140,100,58,0)');
+        ctx.fillStyle = grd;
+        ctx.beginPath();
+        ctx.ellipse(cx, h.gy - 3, h.size * 0.7, 10, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // 边缘小碎屑先兆（从土块边缘偶尔掉落一粒）
+        const n = 3;
+        for (let i = 0; i < n; i++) {
+          const seed = (i + 1) * 13 + (h.x | 0);
+          const side = (i % 2 === 0) ? -1 : 1;
+          const tLocal = ((tGlobal * 1.2 + i * 0.37 + seed * 0.01) % 1);
+          if (tLocal > 0.15 && tLocal < 0.9) {
+            const px = cx + side * h.size * 0.42 + Math.sin(i * 2.1) * 4;
+            const py = cy + h.size * 0.35 + tLocal * 14;
+            ctx.fillStyle = `rgba(160,120,80,${(1 - tLocal) * 0.7})`;
+            ctx.fillRect(px, py, 2, 2);
+          }
+        }
+      }
+
+      // ---------- shaking：颤动加剧+下沉 + 地面阴影加强 ----------
+      if (phase === 'shaking') {
+        const f = phaseP;
+        const grdA = 0.32 + f * 0.32;
+        const grd = ctx.createRadialGradient(cx, h.gy - 3, 2, cx, h.gy - 3, h.size * 0.7);
+        grd.addColorStop(0, `rgba(140,100,58,${grdA})`);
+        grd.addColorStop(1, 'rgba(140,100,58,0)');
+        ctx.fillStyle = grd;
+        ctx.beginPath();
+        ctx.ellipse(cx, h.gy - 3, h.size * 0.7, 10, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // ---------- 土块本体（撞击阶段已经碎成 shards，不画主体） ----------
+      if (phase !== 'impact') {
+        ctx.save();
+        let shakeX = 0, shakeY = 0;
+        if (phase === 'shaking') {
+          const amp = 1.5 + phaseP * 3.5;
+          shakeX = Math.sin(tGlobal * 38 + h.shakePhase) * amp;
+          shakeY = Math.sin(tGlobal * 46 + h.shakePhase + 0.7) * (amp * 0.7);
+        } else if (phase === 'falling') {
+          // 下落时轻微前后抖动（旋转感）
+          shakeX = Math.sin(tGlobal * 20) * 1.2;
+        }
+        ctx.translate(cx + shakeX, cy + shakeY);
+        if (h.rot) ctx.rotate(h.rot);
+
+        // 土色脉冲光晕（预警时呼吸）
+        if (phase === 'precursor' || phase === 'shaking') {
+          const pulse = 0.5 + 0.5 * Math.sin(tGlobal * 6);
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          const glowR = h.size * 1.2 + pulse * 8;
+          const glowG = ctx.createRadialGradient(0, 0, h.size * 0.4, 0, 0, glowR);
+          glowG.addColorStop(0, `rgba(180,140,80,${0.16 + pulse * 0.12})`);
+          glowG.addColorStop(1, 'rgba(180,140,80,0)');
+          ctx.fillStyle = glowG;
+          ctx.beginPath();
+          ctx.arc(0, 0, glowR, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+
+        // 下落中的运动模糊（在土块本体之前，位于上方）
+        if (phase === 'falling' && h.vy > 200) {
+          ctx.globalAlpha = 0.32;
+          ctx.fillStyle = '#8a6a44';
+          const blurLen = Math.min(60, h.vy * 0.06);
+          ctx.beginPath();
+          ctx.ellipse(0, -blurLen * 0.4, h.size * 0.36, blurLen * 0.45, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+
+        // 构建主体多边形路径
+        const s = h.size / 2;
+        const bodyPath = () => {
+          ctx.beginPath();
+          for (let i = 0; i < h.shape.length; i++) {
+            const p = h.shape[i];
+            const px = p.x * s, py = p.y * s;
+            if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+          }
+          ctx.closePath();
+        };
+
+        // ---------- 主体填充 ----------
+        bodyPath();
+        ctx.fillStyle = (phase === 'falling') ? '#6b5638' : 'rgba(70,56,38,0.95)';
+        ctx.fill();
+
+        // ---------- 内部装饰：clip 到主体多边形内，避免溢出随机轮廓 ----------
+        ctx.save();
+        bodyPath();
+        ctx.clip();
+
+        // 内部层理（3 条深色横向线）
+        ctx.strokeStyle = 'rgba(30,20,10,0.45)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(-s * 1.2, -s * 0.35);
+        ctx.lineTo( s * 1.2, -s * 0.30);
+        ctx.moveTo(-s * 1.2, -s * 0.05);
+        ctx.lineTo( s * 1.2,  s * 0.04);
+        ctx.moveTo(-s * 1.2,  s * 0.35);
+        ctx.lineTo( s * 1.2,  s * 0.44);
+        ctx.stroke();
+
+        // 主裂纹（来自 h.cracks）
+        ctx.strokeStyle = 'rgba(20,14,8,0.6)';
+        ctx.lineWidth = 1.1;
+        for (const cr of h.cracks) {
+          ctx.beginPath();
+          ctx.moveTo(cr.x0 * s, cr.y0 * s);
+          ctx.lineTo(cr.x1 * s, cr.y1 * s);
+          ctx.stroke();
+        }
+
+        // 表面碎屑点
+        ctx.fillStyle = 'rgba(30,20,10,0.55)';
+        for (const ch of h.chips) {
+          ctx.beginPath();
+          ctx.arc(ch.x * s, ch.y * s, ch.s, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // 顶面高光（浅色顶部渐变）
+        const topG = ctx.createLinearGradient(0, -s * 1.1, 0, -s * 0.4);
+        topG.addColorStop(0, 'rgba(180,140,88,0.35)');
+        topG.addColorStop(1, 'rgba(180,140,88,0)');
+        ctx.fillStyle = topG;
+        ctx.fillRect(-s * 1.2, -s * 1.1, s * 2.4, s * 0.7);
+
+        // 底面阴影（深色底部渐变）
+        const botG = ctx.createLinearGradient(0, s * 0.2, 0, s * 1.1);
+        botG.addColorStop(0, 'rgba(20,14,8,0)');
+        botG.addColorStop(1, 'rgba(20,14,8,0.55)');
+        ctx.fillStyle = botG;
+        ctx.fillRect(-s * 1.2, s * 0.2, s * 2.4, s * 0.9);
+
+        ctx.restore();
+
+        // 主体描边
+        bodyPath();
+        ctx.strokeStyle = 'rgba(20,14,8,0.7)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // 从底面飘出的碎土粒（预警时更密）
+        if (phase === 'precursor' || phase === 'shaking' || phase === 'falling') {
+          const nParticles = phase === 'falling' ? 5 : (phase === 'shaking' ? 7 : 4);
+          for (let i = 0; i < nParticles; i++) {
+            const px0 = Math.sin(i * 2.7 + h.shakePhase) * h.size * 0.32;
+            const py0 = s * 0.9;
+            const tPhase = ((tGlobal * (0.6 + (i % 3) * 0.25) + i * 0.13) % 1);
+            const px = px0 + Math.sin(i * 3.1 + tGlobal * 3) * 4;
+            const py = py0 + tPhase * 22;
+            const alpha = (1 - tPhase) * 0.7;
+            const sz = 1.5 + (i % 3) * 0.6;
+            ctx.fillStyle = `rgba(180,140,88,${alpha})`;
+            ctx.fillRect(px, py, sz, sz);
+          }
+        }
+
+        ctx.restore();
+      }
       continue;
     }
 
@@ -1303,32 +3565,144 @@ function drawVignette() {
   ctx.fillRect(0, 0, W, H);
 }
 
-/* ================= 光尘 ================= */
+/* ================= 光尘（迷你金面具） =================
+   叙事：主角面具原本"金"的记忆碎片——被三千年时光从铜头上剥落的
+   金色倒影。玩家捡回这些迷你金面具，就是在把那张金面具的记忆一片
+   一片捡回来。视觉：直接画一颗缩小版、发金光的主角面具，让人一眼就
+   懂"这就是主角自己的金色版本"。 */
+function drawMiniGoldMask(x, y, r, rot, phase) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+
+  const rEar = r * 1.15;
+  const rFace = r * 0.72;
+  const rCrown = r * 0.74;
+
+  // 面庞：金色径向渐变（左上亮→右下深），像被太阳照亮的铜质金面
+  const fg = ctx.createRadialGradient(-r * 0.22, -r * 0.22, r * 0.08,
+                                      0, 0, rFace * 1.25);
+  fg.addColorStop(0, '#fff6d6');
+  fg.addColorStop(0.4, '#ffdc82');
+  fg.addColorStop(0.75, '#e0a040');
+  fg.addColorStop(1, '#7a4a1c');
+  ctx.fillStyle = fg;
+
+  // 左右双耳（外张，先画在面庞后面）—— 加大外张幅度，让"金面具"轮廓一眼可辨
+  for (const s of [-1, 1]) {
+    ctx.save();
+    ctx.translate(s * r * 0.66, 0);
+    ctx.rotate(s * 0.50);
+    ctx.beginPath();
+    ctx.moveTo(0, -rEar * 0.42);
+    ctx.lineTo(rEar, -rEar * 0.50);
+    ctx.lineTo(rEar * 0.98, rEar * 0.22);
+    ctx.lineTo(0, rEar * 0.28);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 面庞主体
+  ctx.beginPath();
+  ctx.moveTo(-rFace, -rFace * 0.62);
+  ctx.lineTo(rFace, -rFace * 0.62);
+  ctx.quadraticCurveTo(rFace * 1.18, rFace * 0.18, rFace * 0.66, rFace * 0.82);
+  ctx.lineTo(-rFace * 0.66, rFace * 0.82);
+  ctx.quadraticCurveTo(-rFace * 1.18, rFace * 0.18, -rFace, -rFace * 0.62);
+  ctx.closePath();
+  ctx.fill();
+
+  // 圆筒头冠
+  const cg = ctx.createLinearGradient(-rCrown, 0, rCrown, 0);
+  cg.addColorStop(0, '#5c3210');
+  cg.addColorStop(0.22, '#d4a040');
+  cg.addColorStop(0.5, '#ffe898');
+  cg.addColorStop(0.78, '#d4a040');
+  cg.addColorStop(1, '#5c3210');
+  ctx.fillStyle = cg;
+  const cTop = -rFace * 0.62 - r * 0.75;
+  const cBot = -rFace * 0.62;
+  ctx.fillRect(-rCrown, cTop, rCrown * 2, cBot - cTop);
+  // 冠顶
+  ctx.beginPath();
+  ctx.ellipse(0, cTop, rCrown, r * 0.14, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffe6a8';
+  ctx.fill();
+  // 冠下沿阴影
+  ctx.fillStyle = 'rgba(40,20,4,0.5)';
+  ctx.fillRect(-rCrown, cBot - r * 0.04, rCrown * 2, r * 0.04);
+
+  // 眉骨/鼻梁高光带（一条金色反光带，让"面具脸"的可识别度拉满）
+  ctx.fillStyle = 'rgba(255,255,240,0.55)';
+  ctx.beginPath();
+  ctx.ellipse(-r * 0.24, -r * 0.12, r * 0.08, r * 0.03, -0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(r * 0.24, -r * 0.12, r * 0.08, r * 0.03, 0.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 双眼（深色椭圆眼窝，暗示"注视"）
+  ctx.fillStyle = '#1a0e02';
+  ctx.beginPath();
+  ctx.ellipse(-r * 0.24, r * 0.02, r * 0.11, r * 0.06, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(r * 0.24, r * 0.02, r * 0.11, r * 0.06, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 嘴线（淡淡的横线，暗示面具"表情"）
+  ctx.strokeStyle = 'rgba(80,40,10,0.55)';
+  ctx.lineWidth = Math.max(0.7, r * 0.05);
+  ctx.beginPath();
+  ctx.moveTo(-r * 0.16, r * 0.42);
+  ctx.lineTo(r * 0.16, r * 0.42);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
 function drawMotes() {
   for (const m of motes) {
     if (m.taken) continue;
-    const x = m.x - cam.x, y = m.y + Math.sin(tGlobal * 2.2 + m.x) * 6;
-    if (x < -40 || x > W + 40) continue;
+    // 缓慢浮动 + 轻微侧移（模拟金色记忆碎片在空中飘）
+    const sway = Math.sin(tGlobal * 1.3 + m.x * 0.011) * 5;
+    const drift = Math.sin(tGlobal * 0.6 + m.y * 0.017) * 2.5;
+    const x = m.x + drift - cam.x;
+    const y = m.y + sway;
+    if (x < -80 || x > W + 80) continue;
+
+    // --- 外围暖金光晕（呼吸式拾取提示） ---
+    const pulse = 0.5 + 0.5 * Math.sin(tGlobal * 2.4 + m.x * 0.013);
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    radialGlow(x, y, 46, 'rgba(255,215,120,0.28)');
-    radialGlow(x, y, 16, 'rgba(255,245,200,0.55)');
+    radialGlow(x, y, 70, `rgba(255,208,110,${0.14 + pulse * 0.10})`);
+    radialGlow(x, y, 34, `rgba(255,232,168,${0.28 + pulse * 0.14})`);
+    radialGlow(x, y, 16, 'rgba(255,250,220,0.45)');
     ctx.restore();
-    ctx.fillStyle = '#fff3c4';
-    ctx.beginPath();
-    ctx.arc(x, y, 5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255,225,150,0.7)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(x, y, 11 + Math.sin(tGlobal * 3 + m.y) * 2, 0, Math.PI * 2);
-    ctx.stroke();
+
+    // --- 主体：迷你金面具（尺寸明显可见，一眼可辨） ---
+    const rot = Math.sin(tGlobal * 0.8 + m.x * 0.013) * 0.12;
+    drawMiniGoldMask(x, y, 21, rot, m.x * 0.013);
   }
-  // 收集爆散粒子
+
+  // 收集爆散：金色碎片四散（模拟面具被吸收进主体的爆裂感）
   for (const b of burst) {
     if (b.life <= 0) continue;
-    ctx.fillStyle = `rgba(255,230,160,${b.life / b.max})`;
-    ctx.fillRect(b.x - cam.x, b.y, 3, 3);
+    const alpha = b.life / b.max;
+    const bx = b.x - cam.x;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.translate(bx, b.y);
+    ctx.rotate(b.x * 0.05 + tGlobal * 6);
+    ctx.fillStyle = `rgba(255,225,140,${alpha})`;
+    ctx.beginPath();
+    ctx.moveTo(0, -3);
+    ctx.lineTo(2.6, 2.6);
+    ctx.lineTo(-2.6, 2.6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
   }
 }
 
@@ -1379,6 +3753,76 @@ function drawGoal() {
   }
 }
 
+/* ================= 面具视觉演化：金 → 三千年 → 青铜锈迹 =================
+   每关代表面具在时间轴上的一个状态；色彩 + 表面特效共同讲述这段历史。 */
+function hex2rgb(h) {
+  const s = h.replace('#', '');
+  return [parseInt(s.slice(0, 2), 16), parseInt(s.slice(2, 4), 16), parseInt(s.slice(4, 6), 16)];
+}
+function rgbStr(c) { return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')'; }
+function mixCol(a, b, t) {
+  const A = hex2rgb(a), B = hex2rgb(b);
+  return rgbStr([A[0] + (B[0] - A[0]) * t | 0, A[1] + (B[1] - A[1]) * t | 0, A[2] + (B[2] - A[2]) * t | 0]);
+}
+// 五关：金（炽热）→ 金（余温）→ 金剥落（30%）→ 出土（15%）→ 展柜（10%，记忆残光）
+const ERA = {
+  forge: {
+    // 刚铸好，通体金光，铜质尚未显色
+    goldA: '#fff2b8', goldB: '#ffce66', goldC: '#c88a1e', goldD: '#6a3f08',
+    faceHi: '#fff7d6', faceLo: '#7a4a08',
+    crownA: '#ffd977', crownB: '#c98a20', crownC: '#8a5410', crownD: '#3a1e04', crownTop: '#ffedaa',
+    patina: '#d9a648',
+    patinaColor: '#3a1f04',
+    bronze: '#7a4a08',
+    label: '熔金'
+  },
+  ritual: {
+    // 铜身露出，金光仍在脸侧跳动
+    goldA: '#ffe1a0', goldB: '#e3a54a', goldC: '#a87028', goldD: '#5a3410',
+    faceHi: '#f0c684', faceLo: '#4a2810',
+    crownA: '#e8b866', crownB: '#8a5c20', crownC: '#4a3010', crownD: '#1a0e04', crownTop: '#f0cc88',
+    patina: '#a67538',
+    patinaColor: '#2a1808',
+    bronze: '#4a2810',
+    label: '金光余温'
+  },
+  burial: {
+    // 金光剥落大半，铜身大面积氧化成孔雀绿锈
+    goldA: '#d0b678', goldB: '#9c7c3a', goldC: '#5a5a28', goldD: '#1f3a2a',
+    faceHi: '#c8a860', faceLo: '#3a5a3a',
+    crownA: '#b89450', crownB: '#5a6a30', crownC: '#2a4a30', crownD: '#0a1810', crownTop: '#d4b470',
+    patina: '#6a8a4c',
+    patinaColor: '#1a3020',
+    bronze: '#3a5028',
+    label: '金剥绿锈'
+  },
+  dig: {
+    // 出土瞬间，黄泥覆尘，金光几乎不见
+    goldA: '#b0a088', goldB: '#6c6046', goldC: '#3a3a2a', goldD: '#141812',
+    faceHi: '#9a8868', faceLo: '#303020',
+    crownA: '#8a7a5c', crownB: '#42402c', crownC: '#1e1e14', crownD: '#040806', crownTop: '#a49070',
+    patina: '#5a5a48',
+    patinaColor: '#141812',
+    bronze: '#2a2a1c',
+    label: '出土尘灰'
+  },
+  museum: {
+    // 展柜里，绿锈清晰、光泽稳定；记忆里的金光偶尔一闪
+    goldA: '#96a88a', goldB: '#5a6c4a', goldC: '#2a3a2a', goldD: '#080f0c',
+    faceHi: '#86987a', faceLo: '#2a3a28',
+    crownA: '#7a8c6c', crownB: '#3a4a30', crownC: '#1a2a18', crownD: '#020604', crownTop: '#96a88c',
+    patina: '#4a6848',
+    patinaColor: '#08140c',
+    bronze: '#1f2e1a',
+    label: '展柜残光'
+  }
+};
+const ERA_ORDER = ['forge', 'ritual', 'burial', 'dig', 'museum'];
+function getEra() { return ERA[ERA_ORDER[levelIdx]] || ERA.museum; }
+function eraTheme2Era(t) {
+  return { forge: 'forge', ritual: 'ritual', burial: 'burial', dig: 'dig', museum: 'museum' }[t] || 'museum';
+}
+
 /* ================= 青铜祭司头像（主角） ================= */
 function drawHead(x, y, r, opt) {
   opt = opt || {};
@@ -1387,14 +3831,17 @@ function drawHead(x, y, r, opt) {
   const syy = opt.sy === undefined ? 1 : opt.sy;
   const blink = opt.blink || 0;
   const flat = !!opt.flat;
+  const eraName = opt.era || (typeof levelIdx !== 'undefined' && typeof ERA_ORDER !== 'undefined'
+    ? ERA_ORDER[levelIdx] : 'museum');
+  const E = ERA[eraName] || ERA.museum;
 
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(ang);
   ctx.scale(sxx, syy);
 
-  const patina = ['#3f8068', '#4f9a7c', '#2c5d4e'];
-  const bronze = '#7a5f3a';
+  const patina = [E.goldD, E.goldB, E.goldC];
+  const bronze = E.bronze;
 
   /* --- 尖锥颈 --- */
   const ng = ctx.createLinearGradient(-r * 0.6, 0, r * 0.6, 0);
@@ -1410,11 +3857,12 @@ function drawHead(x, y, r, opt) {
   ctx.closePath();
   ctx.fill();
 
-  /* --- 外张双耳（内缘深入面部，由后绘的面庞覆盖，保证连体） --- */
+  /* --- 外张双耳（内缘深入面部，由后绘的面庞覆盖，保证连体；侧向上扬） --- */
   for (const side of [-1, 1]) {
     ctx.save();
     ctx.translate(side * r * 0.44, -r * 0.08);
-    ctx.rotate(side * 0.30);
+    // 旋转加大：0.30 → 0.50，让整只耳朵外侧（外尖）明显上翘
+    ctx.rotate(side * 0.50);
     const eg = ctx.createLinearGradient(0, -r * 0.4, side * r * 0.6, r * 0.3);
     eg.addColorStop(0, patina[1]);
     eg.addColorStop(0.6, patina[0]);
@@ -1440,10 +3888,10 @@ function drawHead(x, y, r, opt) {
 
   /* --- 面庞 --- */
   const fg = ctx.createRadialGradient(-r * 0.25, -r * 0.35, r * 0.15, 0, 0, r * 1.15);
-  fg.addColorStop(0, '#6fb897');
-  fg.addColorStop(0.45, patina[1]);
-  fg.addColorStop(0.8, patina[0]);
-  fg.addColorStop(1, patina[2]);
+  fg.addColorStop(0, E.faceHi);
+  fg.addColorStop(0.45, E.goldB);
+  fg.addColorStop(0.8, E.goldC);
+  fg.addColorStop(1, E.goldD);
   ctx.fillStyle = fg;
   ctx.beginPath();
   ctx.moveTo(-r * 0.62, -r * 0.74);
@@ -1458,27 +3906,27 @@ function drawHead(x, y, r, opt) {
   const cw = r * 0.72;
   const cTop = -r * 1.72, cBot = -r * 0.70;
   const cg = ctx.createLinearGradient(-cw, 0, cw, 0);
-  cg.addColorStop(0, '#25503f');
-  cg.addColorStop(0.32, '#5a9d80');
-  cg.addColorStop(0.62, '#427d68');
-  cg.addColorStop(1, '#1e4034');
+  cg.addColorStop(0, E.crownC);
+  cg.addColorStop(0.32, E.crownA);
+  cg.addColorStop(0.62, E.crownB);
+  cg.addColorStop(1, E.crownD);
   ctx.fillStyle = cg;
   ctx.fillRect(-cw, cTop, cw * 2, cBot - cTop);
   // 顶面
   ctx.beginPath();
   ctx.ellipse(0, cTop, cw, r * 0.19, 0, 0, Math.PI * 2);
-  ctx.fillStyle = '#3c7460';
+  ctx.fillStyle = E.crownTop;
   ctx.fill();
   ctx.beginPath();
   ctx.ellipse(0, cTop, cw * 0.42, r * 0.08, 0, 0, Math.PI * 2);
-  ctx.fillStyle = '#0c1a15';
+  ctx.fillStyle = '#0a0a06';
   ctx.fill();
   // 冠下沿
   ctx.fillStyle = 'rgba(8,20,16,0.45)';
   ctx.fillRect(-cw, cBot - r * 0.06, cw * 2, r * 0.06);
 
   if (!flat) {
-    /* --- 铜锈斑 --- */
+    /* --- 表面层：按 era 变化（金剥落 / 氧化 / 尘灰 / 展柜） --- */
     ctx.save();
     ctx.beginPath();
     ctx.moveTo(-r * 0.62, -r * 0.74);
@@ -1488,88 +3936,283 @@ function drawHead(x, y, r, opt) {
     ctx.quadraticCurveTo(-r * 0.82, r * 0.05, -r * 0.62, -r * 0.74);
     ctx.closePath();
     ctx.clip();
-    ctx.fillStyle = bronze;
-    ctx.globalAlpha = 0.22;
-    ctx.beginPath();
-    ctx.ellipse(r * 0.34, -r * 0.12, r * 0.22, r * 0.3, 0.4, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.ellipse(-r * 0.40, r * 0.34, r * 0.18, r * 0.16, -0.3, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 0.30;
-    ctx.fillStyle = '#9fd8b8';
-    ctx.beginPath();
-    ctx.ellipse(-r * 0.18, -r * 0.42, r * 0.24, r * 0.14, 0.2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
 
-    /* --- 粗重眉骨 --- */
-    ctx.fillStyle = 'rgba(16,38,30,0.85)';
-    ctx.beginPath();
-    ctx.moveTo(-r * 0.58, -r * 0.42);
-    ctx.lineTo(-r * 0.10, -r * 0.24);
-    ctx.lineTo(-r * 0.10, -r * 0.14);
-    ctx.lineTo(-r * 0.58, -r * 0.26);
-    ctx.closePath();
-    ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(r * 0.58, -r * 0.42);
-    ctx.lineTo(r * 0.10, -r * 0.24);
-    ctx.lineTo(r * 0.10, -r * 0.14);
-    ctx.lineTo(r * 0.58, -r * 0.26);
-    ctx.closePath();
-    ctx.fill();
-
-    /* --- 杏眼（带刻线眼睑） --- */
-    const eyeOpen = 1 - blink;
-    for (const side of [-1, 1]) {
-      const ex = side * r * 0.32, ey = -r * 0.04;
-      const ew = r * 0.24, eh = r * 0.14 * eyeOpen;
-      ctx.save();
+    if (eraName === 'forge') {
+      // 熔金：炽热光斑 + 流动的熔纹
+      ctx.globalCompositeOperation = 'lighter';
+      const moltenGrad = ctx.createRadialGradient(-r * 0.2, -r * 0.2, r * 0.05, 0, 0, r * 1.0);
+      moltenGrad.addColorStop(0, 'rgba(255,255,220,0.65)');
+      moltenGrad.addColorStop(0.4, 'rgba(255,200,80,0.35)');
+      moltenGrad.addColorStop(1, 'rgba(255,120,20,0)');
+      ctx.fillStyle = moltenGrad;
+      ctx.fillRect(-r, -r, r * 2, r * 2);
+      // 熔流条纹
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.strokeStyle = 'rgba(255,180,60,0.5)';
+      ctx.lineWidth = r * 0.05;
+      for (let i = 0; i < 5; i++) {
+        const y = -r * 0.6 + i * r * 0.22 + Math.sin(tGlobal * 3 + i) * r * 0.05;
+        ctx.beginPath();
+        ctx.moveTo(-r * 0.6, y);
+        ctx.quadraticCurveTo(0, y + Math.sin(tGlobal * 2 + i * 0.7) * r * 0.08, r * 0.6, y);
+        ctx.stroke();
+      }
+    } else if (eraName === 'ritual') {
+      // 金光余温：光斑脉动，铜身开始露出
+      ctx.globalCompositeOperation = 'lighter';
+      const glowA = ctx.createRadialGradient(r * 0.1, -r * 0.2, r * 0.05, 0, 0, r * 1.0);
+      glowA.addColorStop(0, 'rgba(255,220,140,0.45)');
+      glowA.addColorStop(0.5, 'rgba(255,170,60,0.15)');
+      glowA.addColorStop(1, 'rgba(255,120,20,0)');
+      ctx.fillStyle = glowA;
+      ctx.fillRect(-r, -r, r * 2, r * 2);
+      ctx.globalCompositeOperation = 'source-over';
+      // 铜色底层斑
+      ctx.fillStyle = E.bronze;
+      ctx.globalAlpha = 0.45;
       ctx.beginPath();
-      ctx.moveTo(ex - ew, ey);
-      ctx.quadraticCurveTo(ex, ey - eh * 1.7, ex + ew, ey);
-      ctx.quadraticCurveTo(ex, ey + eh * 1.1, ex - ew, ey);
-      ctx.closePath();
-      ctx.fillStyle = 'rgba(10,26,22,0.82)';
+      ctx.ellipse(r * 0.3, -r * 0.15, r * 0.28, r * 0.32, 0.4, 0, Math.PI * 2);
       ctx.fill();
-      // 眼睑刻线
-      ctx.strokeStyle = 'rgba(150,215,185,0.55)';
-      ctx.lineWidth = Math.max(1, r * 0.045);
       ctx.beginPath();
-      ctx.moveTo(ex - ew, ey);
-      ctx.quadraticCurveTo(ex, ey - eh * 1.7, ex + ew, ey);
-      ctx.stroke();
-      if (eyeOpen > 0.3) {
-        ctx.fillStyle = 'rgba(225,240,205,0.85)';
+      ctx.ellipse(-r * 0.35, r * 0.3, r * 0.2, r * 0.18, -0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    } else if (eraName === 'burial') {
+      // 金剥绿锈：大面积孔雀绿锈斑 + 零星金箔残片（核心视觉）
+      // 底层铜色
+      ctx.fillStyle = E.bronze;
+      ctx.globalAlpha = 0.55;
+      ctx.beginPath();
+      ctx.ellipse(0, -r * 0.05, r * 0.7, r * 0.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // 绿锈斑：从眼角和边缘向外蔓延
+      const rustSpots = [
+        { x: -r * 0.42, y: -r * 0.35, rx: r * 0.30, ry: r * 0.28, a: 0.78 },
+        { x: r * 0.42, y: -r * 0.30, rx: r * 0.26, ry: r * 0.32, a: 0.72 },
+        { x: -r * 0.30, y: r * 0.35, rx: r * 0.28, ry: r * 0.24, a: 0.70 },
+        { x: r * 0.28, y: r * 0.38, rx: r * 0.24, ry: r * 0.22, a: 0.65 },
+        { x: r * 0.05, y: -r * 0.55, rx: r * 0.28, ry: r * 0.14, a: 0.55 }
+      ];
+      ctx.globalAlpha = 1;
+      for (const s of rustSpots) {
+        const rg = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, Math.max(s.rx, s.ry));
+        rg.addColorStop(0, 'rgba(80,180,120,' + s.a + ')');
+        rg.addColorStop(0.5, 'rgba(40,110,80,' + (s.a * 0.8) + ')');
+        rg.addColorStop(1, 'rgba(20,60,40,0)');
+        ctx.fillStyle = rg;
         ctx.beginPath();
-        ctx.ellipse(ex, ey - r * 0.02, ew * 0.42, eh * 0.75, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#173228';
-        ctx.beginPath();
-        ctx.arc(ex + (opt.gaze || 0) * r * 0.08, ey - r * 0.02, r * 0.075, 0, Math.PI * 2);
+        ctx.ellipse(s.x, s.y, s.rx * 1.2, s.ry * 1.2, 0, 0, Math.PI * 2);
         ctx.fill();
       }
-      ctx.restore();
+      // 残存金箔：亮金色小块 + 边缘光
+      ctx.globalCompositeOperation = 'lighter';
+      const flakes = [
+        { x: -r * 0.05, y: -r * 0.55, w: r * 0.14, h: r * 0.09, a: 0.85 },
+        { x: r * 0.14, y: -r * 0.10, w: r * 0.11, h: r * 0.08, a: 0.70 },
+        { x: -r * 0.10, y: r * 0.12, w: r * 0.12, h: r * 0.07, a: 0.65 }
+      ];
+      for (const f of flakes) {
+        const grd = ctx.createLinearGradient(f.x - f.w, f.y, f.x + f.w, f.y);
+        grd.addColorStop(0, 'rgba(255,220,120,0)');
+        grd.addColorStop(0.5, 'rgba(255,230,150,' + f.a + ')');
+        grd.addColorStop(1, 'rgba(255,200,90,0)');
+        ctx.fillStyle = grd;
+        ctx.beginPath();
+        ctx.ellipse(f.x, f.y, f.w, f.h, 0.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalCompositeOperation = 'source-over';
+    } else if (eraName === 'dig') {
+      // 出土：黄泥覆尘 + 极少量金屑微光
+      ctx.fillStyle = '#3a3220';
+      ctx.globalAlpha = 0.55;
+      ctx.fillRect(-r, -r, r * 2, r * 2);
+      // 泥块颗粒
+      ctx.globalAlpha = 0.75;
+      ctx.fillStyle = '#2a2418';
+      const pebbles = [
+        { x: -r * 0.3, y: -r * 0.4, s: r * 0.18 },
+        { x: r * 0.35, y: -r * 0.15, s: r * 0.22 },
+        { x: -r * 0.2, y: r * 0.35, s: r * 0.20 },
+        { x: r * 0.15, y: r * 0.4, s: r * 0.15 }
+      ];
+      for (const p of pebbles) {
+        ctx.beginPath();
+        ctx.ellipse(p.x, p.y, p.s, p.s * 0.7, 0.3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // 极微金光（记忆里仅剩的一丝）
+      ctx.globalCompositeOperation = 'lighter';
+      const faintGold = ctx.createRadialGradient(r * 0.15, -r * 0.35, 0, r * 0.15, -r * 0.35, r * 0.4);
+      faintGold.addColorStop(0, 'rgba(255,220,140,0.20)');
+      faintGold.addColorStop(1, 'rgba(255,180,80,0)');
+      ctx.fillStyle = faintGold;
+      ctx.fillRect(-r, -r, r * 2, r * 2);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+    } else {
+      // museum：展柜绿锈稳定，偶有金光记忆闪过
+      ctx.fillStyle = E.bronze;
+      ctx.globalAlpha = 0.5;
+      ctx.beginPath();
+      ctx.ellipse(r * 0.32, -r * 0.12, r * 0.24, r * 0.3, 0.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(-r * 0.38, r * 0.32, r * 0.18, r * 0.16, -0.3, 0, Math.PI * 2);
+      ctx.fill();
+      // 稳定绿锈斑
+      ctx.globalAlpha = 0.42;
+      ctx.fillStyle = '#5a8c68';
+      ctx.beginPath();
+      ctx.ellipse(-r * 0.2, -r * 0.45, r * 0.26, r * 0.14, 0.2, 0, Math.PI * 2);
+      ctx.fill();
+      // 记忆金光：极缓慢的呼吸式微光（每 ~6 秒闪一次）
+      const memPhase = (Math.sin(tGlobal * 0.6) + 1) * 0.5; // 0..1
+      const memGlow = Math.pow(memPhase, 4) * 0.35; // 只在峰值附近亮起
+      if (memGlow > 0.02) {
+        ctx.globalCompositeOperation = 'lighter';
+        const mem = ctx.createRadialGradient(-r * 0.15, -r * 0.25, 0, -r * 0.15, -r * 0.25, r * 0.5);
+        mem.addColorStop(0, 'rgba(255,225,150,' + memGlow + ')');
+        mem.addColorStop(1, 'rgba(255,180,80,0)');
+        ctx.fillStyle = mem;
+        ctx.fillRect(-r, -r, r * 2, r * 2);
+        ctx.globalCompositeOperation = 'source-over';
+      }
+      ctx.globalAlpha = 1;
     }
+    ctx.restore();
 
-    /* --- 宽鼻 --- */
-    ctx.fillStyle = 'rgba(20,48,38,0.55)';
+    /* --- 粗重眉骨（宽扁眉翼，贴宽脸边缘） --- */
+    ctx.fillStyle = E.patinaColor;
     ctx.beginPath();
-    ctx.moveTo(0, r * 0.02);
-    ctx.lineTo(-r * 0.17, r * 0.34);
-    ctx.lineTo(r * 0.17, r * 0.34);
+    ctx.moveTo(-r * 0.56, -r * 0.22);
+    ctx.quadraticCurveTo(-r * 0.30, -r * 0.36, -r * 0.06, -r * 0.22);
+    ctx.lineTo(-r * 0.06, -r * 0.08);
+    ctx.quadraticCurveTo(-r * 0.30, -r * 0.22, -r * 0.56, -r * 0.12);
     ctx.closePath();
     ctx.fill();
-    ctx.fillStyle = 'rgba(150,210,180,0.30)';
-    ctx.fillRect(-r * 0.03, r * 0.06, r * 0.06, r * 0.24);
-
-    /* --- 薄唇紧闭 --- */
-    ctx.strokeStyle = 'rgba(14,34,28,0.85)';
-    ctx.lineWidth = Math.max(1, r * 0.07);
     ctx.beginPath();
-    ctx.moveTo(-r * 0.20, r * 0.50);
-    ctx.quadraticCurveTo(0, r * 0.54, r * 0.20, r * 0.50);
+    ctx.moveTo(r * 0.56, -r * 0.22);
+    ctx.quadraticCurveTo(r * 0.30, -r * 0.36, r * 0.06, -r * 0.22);
+    ctx.lineTo(r * 0.06, -r * 0.08);
+    ctx.quadraticCurveTo(r * 0.30, -r * 0.22, r * 0.56, -r * 0.12);
+    ctx.closePath();
+    ctx.fill();
+
+    /* --- 纵目（圆柱凸出眼球——三星堆面具的标志性特征） --- */
+    const eyeOpen = 1 - blink;
+    // 眼睑刻线颜色：金时代是暖金光，绿锈时代是翠光，出土时代灰调
+    const eyeLineColors = {
+      forge:  'rgba(255,220,140,0.75)',
+      ritual: 'rgba(230,180,100,0.65)',
+      burial: 'rgba(150,215,180,0.55)',
+      dig:    'rgba(180,170,130,0.45)',
+      museum: 'rgba(150,215,185,0.55)'
+    };
+    for (const side of [-1, 1]) {
+      // 眼窝深凹（画眼柱之前，在脸部刻一个椭圆暗窝）
+      ctx.fillStyle = 'rgba(10,26,22,0.78)';
+      ctx.beginPath();
+      ctx.ellipse(side * r * 0.34, -r * 0.02, r * 0.26, r * 0.13 * eyeOpen + 0.001, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (eyeOpen > 0.28) {
+        // 纵目：从眼窝向外伸出的圆柱（三星堆面具最独特的造型）
+        const eyeY = -r * 0.02;
+        const eyeRad = r * 0.11 * (0.55 + 0.45 * eyeOpen);
+        const eyeBaseX = side * r * 0.18;   // 内端贴鼻梁
+        const eyeTipX = side * r * 0.52;    // 外端突出到脸边缘
+        // 关键：外端抬高 0.05r——三星堆"内低外高"的神秘感（斜度约 8.4°）
+        const tipLift = r * 0.05;
+        const eyeTipY = eyeY - tipLift;
+        const eg = ctx.createLinearGradient(0, eyeY - eyeRad, 0, eyeY + eyeRad);
+        eg.addColorStop(0, '#e8dcc0');
+        eg.addColorStop(0.45, '#b8a878');
+        eg.addColorStop(0.7, '#8a7a52');
+        eg.addColorStop(1, '#483a24');
+        ctx.fillStyle = eg;
+        // 圆柱身体：内端保持 eyeY，外端上抬至 eyeTipY（轻微斜线）
+        ctx.beginPath();
+        ctx.moveTo(eyeBaseX, eyeY - eyeRad);
+        ctx.lineTo(eyeTipX, eyeTipY - eyeRad);
+        ctx.lineTo(eyeTipX, eyeTipY + eyeRad);
+        ctx.lineTo(eyeBaseX, eyeY + eyeRad);
+        ctx.closePath();
+        ctx.fill();
+        // 内端盖（连接面部侧）
+        ctx.beginPath();
+        ctx.ellipse(eyeBaseX, eyeY, eyeRad * 0.55, eyeRad, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // 外端盖（凸出的眼球面，画瞳孔）
+        ctx.beginPath();
+        ctx.ellipse(eyeTipX, eyeTipY, eyeRad * 0.72, eyeRad, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // 瞳孔（凸眼末端的高光瞳孔）
+        ctx.fillStyle = '#0a1a14';
+        ctx.beginPath();
+        ctx.ellipse(eyeTipX, eyeTipY, eyeRad * 0.36, eyeRad * 0.42, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // 瞳孔高光
+        ctx.fillStyle = 'rgba(255,240,210,0.75)';
+        ctx.beginPath();
+        ctx.ellipse(eyeTipX + side * r * 0.02, eyeTipY - eyeRad * 0.15, eyeRad * 0.12, eyeRad * 0.14, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // 眼柱上缘刻线（内低外高）
+        ctx.strokeStyle = eyeLineColors[eraName] || 'rgba(150,215,185,0.55)';
+        ctx.lineWidth = Math.max(1, r * 0.032);
+        ctx.beginPath();
+        ctx.moveTo(eyeBaseX, eyeY - eyeRad);
+        ctx.lineTo(eyeTipX, eyeTipY - eyeRad);
+        ctx.stroke();
+      } else {
+        // 闭眼：一条微微斜向上的刻线（与睁眼斜度一致）
+        ctx.strokeStyle = eyeLineColors[eraName] || 'rgba(150,215,185,0.55)';
+        ctx.lineWidth = Math.max(1, r * 0.04);
+        ctx.beginPath();
+        ctx.moveTo(side * r * 0.18, -r * 0.02);
+        ctx.lineTo(side * r * 0.52, -r * 0.07);
+        ctx.stroke();
+      }
+    }
+
+    /* --- 宽鼻（鼻梁高挺，鼻翼宽方） --- */
+    ctx.fillStyle = E.bronze;
+    ctx.globalAlpha = 0.55;
+    ctx.beginPath();
+    ctx.moveTo(0, -r * 0.02);
+    ctx.lineTo(-r * 0.20, r * 0.40);
+    ctx.lineTo(r * 0.20, r * 0.40);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    // 鼻梁高光
+    ctx.fillStyle = 'rgba(220,200,150,0.28)';
+    ctx.fillRect(-r * 0.03, r * 0.00, r * 0.06, r * 0.28);
+    // 鼻翼两侧暗色
+    ctx.fillStyle = 'rgba(10,26,22,0.35)';
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.20, r * 0.40);
+    ctx.quadraticCurveTo(-r * 0.10, r * 0.44, 0, r * 0.42);
+    ctx.quadraticCurveTo(r * 0.10, r * 0.44, r * 0.20, r * 0.40);
+    ctx.lineTo(r * 0.20, r * 0.36);
+    ctx.quadraticCurveTo(0, r * 0.38, -r * 0.20, r * 0.36);
+    ctx.closePath();
+    ctx.fill();
+
+    /* --- 方唇（宽直，三星堆面具典型特征） --- */
+    ctx.fillStyle = 'rgba(10,26,22,0.55)';
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.30, r * 0.58);
+    ctx.quadraticCurveTo(0, r * 0.66, r * 0.30, r * 0.58);
+    ctx.quadraticCurveTo(0, r * 0.74, -r * 0.30, r * 0.58);
+    ctx.closePath();
+    ctx.fill();
+    // 唇线刻槽
+    ctx.strokeStyle = 'rgba(8,20,16,0.7)';
+    ctx.lineWidth = Math.max(1, r * 0.04);
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.30, r * 0.58);
+    ctx.quadraticCurveTo(0, r * 0.64, r * 0.30, r * 0.58);
     ctx.stroke();
   }
 
@@ -1616,11 +4259,37 @@ function drawPlayer() {
   });
   ctx.restore();
 
-  // 微弱轮廓光
+  // 微弱轮廓光：按关卡演化（熔金强、出土弱、展柜冷）
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  radialGlow(px, py - player.r * 0.2, player.r * 2.4, 'rgba(120,220,180,0.05)');
+  const glowColors = {
+    forge: 'rgba(255,210,120,0.20)',
+    ritual: 'rgba(255,190,100,0.14)',
+    burial: 'rgba(160,220,140,0.08)',
+    dig: 'rgba(180,170,130,0.06)',
+    museum: 'rgba(140,210,180,0.10)'
+  };
+  radialGlow(px, py - player.r * 0.2, player.r * 2.4,
+    glowColors[ERA_ORDER[levelIdx]] || 'rgba(120,220,180,0.05)');
   ctx.restore();
+
+  // 收集迷你金面具后：面具闪金光（3 层同心脉冲光晕）
+  if (player.goldFlash > 0) {
+    const gf = player.goldFlash;
+    const pulse = 0.6 + 0.4 * Math.sin(tGlobal * 18);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const layers = [
+      { r: 2.6, a: 0.32, c: 'rgba(255,235,140,' },
+      { r: 1.8, a: 0.42, c: 'rgba(255,215,90,' },
+      { r: 1.15, a: 0.55, c: 'rgba(255,245,190,' }
+    ];
+    for (const L of layers) {
+      radialGlow(px, py - player.r * 0.15, player.r * L.r * pulse,
+        L.c + (L.a * Math.min(1, gf * 1.4)) + ')');
+    }
+    ctx.restore();
+  }
 }
 
 /* ================= HUD ================= */
@@ -1630,15 +4299,91 @@ function drawHUD() {
   ctx.font = '600 22px "Microsoft YaHei", sans-serif';
   ctx.fillText(level.name, 40, 52);
 
+  // 时代徽章：显示面具当前在"金→三千年→青铜锈迹"时间轴上的位置
+  const eraName = ERA_ORDER[levelIdx];
+  const era = ERA[eraName];
+  const eraColors = {
+    forge:  { fill: 'rgba(255,200,90,0.22)',  border: 'rgba(255,220,140,0.75)', text: '#ffe0a0' },
+    ritual: { fill: 'rgba(230,160,70,0.20)',  border: 'rgba(230,180,100,0.7)',  text: '#f0c684' },
+    burial: { fill: 'rgba(120,180,90,0.18)',  border: 'rgba(160,215,150,0.65)', text: '#c8d8a0' },
+    dig:    { fill: 'rgba(150,130,90,0.20)',  border: 'rgba(180,170,130,0.6)',  text: '#b0a088' },
+    museum: { fill: 'rgba(90,150,120,0.22)',  border: 'rgba(140,200,170,0.7)',  text: '#a0c8b0' }
+  };
+  const eraShort = { forge: '熔金', ritual: '祭祀', burial: '埋藏', dig: '出土', museum: '展陈' };
+  const eraYears = { forge: '前1600', ritual: '前1300', burial: '—', dig: '1986', museum: '今日' };
+  const ec = eraColors[eraName] || eraColors.museum;
+  const bx = 55, by = 66, bw = 445, bh = 40;
+  ctx.save();
+  ctx.fillStyle = 'rgba(6,12,10,0.55)';
+  ctx.fillRect(bx, by, bw, bh);
+  ctx.strokeStyle = ec.border;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
+  // 顶部标题
+  ctx.fillStyle = 'rgba(210,190,140,0.72)';
+  ctx.font = '600 10px "Microsoft YaHei", sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('三千年演化', bx + 10, by + 12);
+  // 当前 era 名称 + 年份（右侧醒目）
+  ctx.textAlign = 'right';
+  ctx.fillStyle = ec.text;
+  ctx.font = '700 12px "Microsoft YaHei", sans-serif';
+  ctx.fillText(era.label + ' · ' + eraYears[eraName], bx + bw - 10, by + 12);
+  // 时间轴线
+  const axY = by + 24;
+  const axX = bx + 30, axW = bw - 60;
+  ctx.strokeStyle = 'rgba(200,180,130,0.32)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(axX, axY);
+  ctx.lineTo(axX + axW, axY);
+  ctx.stroke();
+  // 5 段时代刻度
+  for (let i = 0; i < 5; i++) {
+    const dotX = axX + i * (axW / 4);
+    const cur = i === levelIdx;
+    const past = i < levelIdx;
+    // 连线（到下一段）
+    if (i < 4) {
+      ctx.strokeStyle = i < levelIdx ? ec.text : 'rgba(200,180,130,0.22)';
+      ctx.lineWidth = i < levelIdx ? 1.8 : 1;
+      ctx.beginPath();
+      ctx.moveTo(dotX + 5, axY);
+      ctx.lineTo(dotX + axW / 4 - 5, axY);
+      ctx.stroke();
+    }
+    // 圆点
+    ctx.beginPath();
+    ctx.arc(dotX, axY, cur ? 6 : (past ? 4.2 : 3), 0, Math.PI * 2);
+    ctx.fillStyle = cur ? ec.text : (past ? 'rgba(200,180,130,0.7)' : 'rgba(200,200,200,0.22)');
+    ctx.fill();
+    // 当前时代外圈
+    if (cur) {
+      ctx.beginPath();
+      ctx.arc(dotX, axY, 10, 0, Math.PI * 2);
+      ctx.strokeStyle = ec.text;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+    // era 短名（下方）
+    ctx.textAlign = 'center';
+    ctx.fillStyle = cur ? ec.text : (past ? 'rgba(220,210,180,0.55)' : 'rgba(200,200,180,0.35)');
+    ctx.font = cur ? '700 10px "Microsoft YaHei", sans-serif'
+                   : '10px "Microsoft YaHei", sans-serif';
+    ctx.fillText(eraShort[ERA_ORDER[i]], dotX, by + bh - 1);
+  }
+  ctx.restore();
+  ctx.textAlign = 'left';
+
   ctx.font = '13px "Microsoft YaHei", sans-serif';
   ctx.fillStyle = 'rgba(180,215,200,0.55)';
-  ctx.fillText('键盘：← → / A D 移动 · 空格 跳跃 · R 重来 · Esc 退出', 40, 76);
+  ctx.fillText('键盘：← → / A D 移动 · 空格 跳跃 · R 重来 · Esc 退出 · M 静音', 40, 124);
   ctx.fillStyle = pad.connected ? 'rgba(150,235,190,0.75)' : 'rgba(255,190,120,0.80)';
   ctx.fillText(pad.connected
-    ? '手柄：已连接 · 左摇杆/十字键 移动 · A 跳跃 · B 退出'
+    ? '手柄：已连接 · 左摇杆/十字键 移动 · 任意键 跳跃 · Back/Select 退出'
     : (!pageActivated && HAS_GAMEPAD_API && !IN_IFRAME
         ? '手柄：待激活 — 先点一下画面或按一下键盘，再按手柄任意键'
-        : '手柄：未检测到（按一下手柄任意键唤醒；USB 需先在系统里识别）'), 40, 96);
+        : '手柄：未检测到（按一下手柄任意键唤醒；USB 需先在系统里识别）'), 40, 142);
   // 手柄实时诊断（便于确认按键编号）
   if (pad.connected) {
     ctx.font = '11px Consolas, monospace';
@@ -1659,10 +4404,10 @@ function drawHUD() {
   // 光尘计数
   ctx.fillStyle = 'rgba(255,230,160,0.9)';
   ctx.font = '600 15px "Microsoft YaHei", sans-serif';
-  ctx.fillText('光尘 ' + collected + ' / ' + level.motes.length, 40, 132);
+  ctx.fillText('光尘 ' + collected + ' / ' + level.motes.length, 40, 162);
   for (let i = 0; i < level.motes.length; i++) {
     ctx.beginPath();
-    ctx.arc(146 + i * 18, 127, 4.5, 0, Math.PI * 2);
+    ctx.arc(146 + i * 18, 157, 4.5, 0, Math.PI * 2);
     ctx.fillStyle = i < collected ? '#ffe9a8' : 'rgba(255,255,255,0.16)';
     ctx.fill();
   }
@@ -1670,9 +4415,9 @@ function drawHUD() {
   // 生命
   ctx.font = '600 15px "Microsoft YaHei", sans-serif';
   ctx.fillStyle = 'rgba(235,205,150,0.9)';
-  ctx.fillText('生命', 268, 132);
+  ctx.fillText('生命', 268, 162);
   for (let i = 0; i < MAXHP; i++) {
-    const hx = 318 + i * 24, hy = 127;
+    const hx = 318 + i * 24, hy = 157;
     ctx.beginPath();
     ctx.arc(hx, hy, 8, 0, Math.PI * 2);
     if (i < player.hp) {
@@ -1718,6 +4463,27 @@ function drawExit() {
   ctx.textAlign = 'left';
 }
 
+/* ---- 音效开关按钮：图标 + 文字，静音时变灰、显示禁止线 ---- */
+function drawSoundBtn() {
+  const b = BTN_SOUND;
+  const hov = inSound(mouse);
+  ctx.save();
+  ctx.fillStyle = hov ? 'rgba(150,220,190,0.20)' : 'rgba(10,18,16,0.55)';
+  ctx.fillRect(b.x, b.y, b.w, b.h);
+  ctx.strokeStyle = audioMuted
+    ? 'rgba(255,170,90,0.75)'
+    : (hov ? 'rgba(255,225,150,0.9)' : 'rgba(190,215,205,0.38)');
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(b.x + 0.5, b.y + 0.5, b.w - 1, b.h - 1);
+  ctx.fillStyle = audioMuted ? 'rgba(255,190,120,0.9)' : 'rgba(215,232,224,0.9)';
+  ctx.font = '15px "Microsoft YaHei", sans-serif';
+  ctx.textAlign = 'center';
+  const label = audioMuted ? '🔇 已静音 (M)' : '🔊 音效开 (M)';
+  ctx.fillText(label, b.x + b.w / 2, b.y + 25);
+  ctx.restore();
+  ctx.textAlign = 'left';
+}
+
 /* ================= 文字换行 ================= */
 function wrapText(text, x, y, maxW, lineH, color, font) {
   ctx.font = font;
@@ -1758,9 +4524,12 @@ function drawTitle() {
   ctx.fillStyle = '#e8d4a0';
   ctx.font = '700 62px "Microsoft YaHei", serif';
   ctx.fillText('一眼三千年', W / 2, 96);
-  ctx.fillStyle = 'rgba(200,225,210,0.7)';
+  ctx.fillStyle = 'rgba(200,225,210,0.78)';
   ctx.font = '17px "Microsoft YaHei", sans-serif';
   ctx.fillText('三星堆祭司青铜头像 · 铸造 → 受祭 → 掩埋 → 发掘 → 展出', W / 2, 134);
+  ctx.fillStyle = 'rgba(255,210,130,0.72)';
+  ctx.font = '14px "Microsoft YaHei", sans-serif';
+  ctx.fillText('三千年前，它是一张金面具；三千年后，我们才第一次看见它', W / 2, 158);
 
   // 文物本体
   ctx.save();
@@ -1776,17 +4545,45 @@ function drawTitle() {
   // 题眼
   ctx.fillStyle = 'rgba(235,220,175,0.85)';
   ctx.font = '18px "Microsoft YaHei", serif';
-  ctx.fillText('“三千年前的一张脸，只为看你一眼。”', W / 2, 590);
+  ctx.fillText('“三千年前的一张脸，只为看你一眼。”', W / 2, 580);
+
+  // 浏览器要求"用户交互"后才放行音频：只用手柄开始会全程静音，这里明确提示
+  if (!audioStarted) {
+    ctx.fillStyle = `rgba(255,205,130,${0.6 + 0.4 * Math.sin(tGlobal * 4)})`;
+    ctx.font = '14px "Microsoft YaHei", sans-serif';
+    ctx.fillText('· 点一下画面或按一下键盘，开启声音 ·', W / 2, 612);
+  }
 
   // 开始
   ctx.fillStyle = `rgba(255,240,190,${0.55 + 0.45 * Math.sin(tGlobal * 3)})`;
   ctx.font = '600 21px "Microsoft YaHei", sans-serif';
-  ctx.fillText('按 空格 / Enter / 手柄 Start 开始', W / 2, 650);
+  ctx.fillText('按 空格 / Enter / 手柄任意键 开始', W / 2, 648);
 
   ctx.fillStyle = 'rgba(150,180,170,0.45)';
   ctx.font = '13px "Microsoft YaHei", sans-serif';
-  ctx.fillText('键盘：← → / A D 移动 · 空格 跳跃 · R 重来 · Esc 退出', W / 2, 684);
-  ctx.fillText('手柄：左摇杆 / 十字键 移动 · A 跳跃 · Start 开始 · B 退出', W / 2, 704);
+  ctx.fillText('键盘：← → / A D 移动 · 空格 跳跃 · R 重来 · Esc 退出 · M 静音', W / 2, 678);
+  ctx.fillText('手柄：左摇杆 / 十字键 移动 · 任意键 跳跃 / 确认 · Back / Select 退出', W / 2, 698);
+
+  // 手柄状态与实时诊断（放左上角，避开底部居中的按键说明；玩家可能进不了游戏看不到 HUD）
+  ctx.textAlign = 'left';
+  if (pad.connected) {
+    ctx.font = '12px "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = 'rgba(150,235,190,0.85)';
+    ctx.fillText('手柄：已连接 · ' + String(pad.name).slice(0, 30), 80, 46);
+    ctx.font = '11px Consolas, monospace';
+    ctx.fillStyle = 'rgba(140,225,185,0.5)';
+    ctx.fillText('axes[' + pad.axes + ']  按下键[' + (pad.dbg || '无') + ']  左' +
+                 (pad.left ? 1 : 0) + ' 右' + (pad.right ? 1 : 0) +
+                 ' 跳' + (pad.jump ? 1 : 0), 80, 64);
+  } else {
+    ctx.font = '12px "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = 'rgba(255,180,100,0.9)';
+    ctx.fillText(IN_IFRAME
+      ? '⚠ 手柄未检测到：正在预览窗（iframe）内运行，浏览器屏蔽了手柄，请双击 HTML 用独立窗口打开'
+      : (!HAS_GAMEPAD_API
+          ? '⚠ 手柄未检测到：当前浏览器不支持 Gamepad API'
+          : '⚠ 手柄未检测到：先点一下画面，再按手柄任意键（USB 需系统已识别）'), 80, 54);
+  }
 
   // 预览窗 / iframe 环境：Gamepad API 会被浏览器屏蔽，给出明确指引
   if (IN_IFRAME || !HAS_GAMEPAD_API) {
@@ -1818,60 +4615,164 @@ function drawTitle() {
 
 /* ================= 关卡过场 ================= */
 function drawIntro() {
-  ctx.fillStyle = 'rgba(4,9,8,0.92)';
+  ctx.fillStyle = 'rgba(4,9,8,0.94)';
   ctx.fillRect(0, 0, W, H);
 
-  const th = THEME[level.theme];
+  // 背景氛围光
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  radialGlow(300, 360, 300, level.theme === 'forge' ? 'rgba(255,140,60,0.16)'
-    : level.theme === 'ritual' ? 'rgba(255,180,90,0.14)'
-    : level.theme === 'burial' ? 'rgba(140,190,120,0.10)'
-    : level.theme === 'dig' ? 'rgba(255,225,160,0.12)'
-    : 'rgba(200,220,255,0.10)');
+  radialGlow(300, 360, 340, level.theme === 'forge' ? 'rgba(255,140,60,0.20)'
+    : level.theme === 'ritual' ? 'rgba(255,180,90,0.18)'
+    : level.theme === 'burial' ? 'rgba(140,190,120,0.14)'
+    : level.theme === 'dig' ? 'rgba(255,225,160,0.16)'
+    : 'rgba(200,220,255,0.14)');
   ctx.restore();
 
-  // 文物图
-  if (!drawArtifact(300, 360, 400, 0.9)) {
-    ctx.fillStyle = 'rgba(200,225,210,0.3)';
-    ctx.textAlign = 'center';
-    ctx.font = '15px "Microsoft YaHei", sans-serif';
-    ctx.fillText('文物配图', 300, 360);
+  /* ============ 左侧：面具"金→三千年→青铜锈迹"演变过场动画 ============ */
+  // 循环播放：演变 9s（每个时代约 1.8s，看得清金→绿的渐进）→ 停在"展柜之上" 3s → 回到熔金再演一遍
+  // 停顿是为了让观众看清终态，也不会觉得"上一轮刚结束下一轮就开"很生硬
+  const EVOLVE_DUR = 9.0;
+  const EVOLVE_HOLD = 3.0;
+  const EVOLVE_CYCLE = EVOLVE_DUR + EVOLVE_HOLD;
+  const evolvePhase = stateT % EVOLVE_CYCLE;
+  const evolveProgress = Math.min(1, evolvePhase / EVOLVE_DUR);
+
+  let evolveEra;
+  if (evolveProgress < 0.20)      evolveEra = 'forge';
+  else if (evolveProgress < 0.42) evolveEra = 'ritual';
+  else if (evolveProgress < 0.64) evolveEra = 'burial';
+  else if (evolveProgress < 0.86) evolveEra = 'dig';
+  else                            evolveEra = 'museum';
+
+  const evolveLabelMap = {
+    forge:  { name: '熔金为器',    t0: '约 前 1600', color: '#ffe0a0' },
+    ritual: { name: '祭天通神',    t0: '前 1300—1046', color: '#f0c684' },
+    burial: { name: '沉入地底',    t0: '封埋三千年',   color: '#c8d8a0' },
+    dig:    { name: '破土重光',    t0: '1986 年',     color: '#c4a884' },
+    museum: { name: '展柜之上',    t0: '今日',       color: '#a0c8b0' }
+  };
+
+  // 演变时间轴（顶部）
+  const tlY = 210, tlX = 90, tlW = 420;
+  ctx.strokeStyle = 'rgba(200,180,130,0.25)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(tlX, tlY);
+  ctx.lineTo(tlX + tlW, tlY);
+  ctx.stroke();
+
+  for (let i = 0; i < 5; i++) {
+    const dx = tlX + i * (tlW / 4);
+    const cur = evolveEra === ERA_ORDER[i];
+    const past = i < ERA_ORDER.indexOf(evolveEra);
+    ctx.beginPath();
+    ctx.arc(dx, tlY, cur ? 6 : (past ? 4 : 3), 0, Math.PI * 2);
+    ctx.fillStyle = cur ? evolveLabelMap[ERA_ORDER[i]].color
+      : (past ? 'rgba(200,180,130,0.7)' : 'rgba(200,200,200,0.22)');
+    ctx.fill();
+    if (cur) {
+      ctx.beginPath();
+      ctx.arc(dx, tlY, 10, 0, Math.PI * 2);
+      ctx.strokeStyle = evolveLabelMap[ERA_ORDER[i]].color;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
+  // 当前演变标签
+  const curLbl = evolveLabelMap[evolveEra];
+  ctx.textAlign = 'left';
+  ctx.fillStyle = curLbl.color;
+  ctx.font = '700 18px "Microsoft YaHei", sans-serif';
+  ctx.fillText(curLbl.name, tlX, tlY - 18);
+  ctx.font = '12px "Microsoft YaHei", sans-serif';
+  ctx.fillStyle = 'rgba(200,200,180,0.6)';
+  ctx.fillText(curLbl.t0, tlX + 100, tlY - 18);
+
+  // 面具本体（居中展示演变）
+  const hdX = 300, hdY = 360;
+  const hdR = 82;
+
+  // 底部辉光
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const evolveGlowColors = {
+    forge:  'rgba(255,180,80,0.35)',
+    ritual: 'rgba(255,160,70,0.25)',
+    burial: 'rgba(140,180,120,0.18)',
+    dig:    'rgba(220,200,150,0.22)',
+    museum: 'rgba(160,210,180,0.20)'
+  };
+  radialGlow(hdX, hdY, hdR * 2.6, evolveGlowColors[evolveEra]);
+  ctx.restore();
+
+  drawHead(hdX, hdY, hdR, {
+    angle: 0, sx: 1, sy: 1, blink: 0, flat: false, era: evolveEra
+  });
+
+  // 底部时间轴标签（当前 era 高亮）
+  const tlY2 = 500;
+  ctx.textAlign = 'center';
+  ctx.font = '11px "Microsoft YaHei", sans-serif';
+  const eraTicks = [
+    { x: tlX,             era: 'forge',  yr: '约前1600' },
+    { x: tlX + tlW * 0.25, era: 'ritual', yr: '前1300—1046' },
+    { x: tlX + tlW * 0.5,  era: 'burial', yr: '三千年' },
+    { x: tlX + tlW * 0.75, era: 'dig',    yr: '1986' },
+    { x: tlX + tlW,        era: 'museum', yr: '今日' }
+  ];
+  for (const tk of eraTicks) {
+    const cur = tk.era === evolveEra;
+    ctx.fillStyle = cur ? evolveLabelMap[tk.era].color : 'rgba(200,200,180,0.35)';
+    ctx.font = cur ? '700 12px "Microsoft YaHei", sans-serif'
+                   : '11px "Microsoft YaHei", sans-serif';
+    ctx.fillText(tk.era, tk.x, tlY2);
+    ctx.fillStyle = cur ? 'rgba(230,220,180,0.85)' : 'rgba(180,180,160,0.35)';
+    ctx.font = '10px "Microsoft YaHei", sans-serif';
+    ctx.fillText(tk.yr, tk.x, tlY2 + 14);
   }
 
   // 竖线分隔
   ctx.strokeStyle = 'rgba(210,190,140,0.25)';
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(560, 200);
-  ctx.lineTo(560, 540);
+  ctx.moveTo(600, 130);
+  ctx.lineTo(600, 540);
   ctx.stroke();
+
+  // ============ 右侧：文物图 + 关卡信息 ============
+  if (!drawArtifact(900, 340, 360, 0.92)) {
+    ctx.fillStyle = 'rgba(200,225,210,0.3)';
+    ctx.textAlign = 'center';
+    ctx.font = '15px "Microsoft YaHei", sans-serif';
+    ctx.fillText('文物配图', 900, 340);
+  }
 
   // 关卡序号
   ctx.textAlign = 'left';
   ctx.fillStyle = '#d8bd7d';
   ctx.font = '15px "Microsoft YaHei", sans-serif';
-  ctx.fillText('第 ' + (levelIdx + 1) + ' / ' + LEVELS.length + ' 关', 610, 232);
+  ctx.fillText('第 ' + (levelIdx + 1) + ' / ' + LEVELS.length + ' 关', 640, 232);
 
   ctx.fillStyle = '#f0e2bb';
   ctx.font = '700 44px "Microsoft YaHei", serif';
-  ctx.fillText(level.name, 606, 288);
+  ctx.fillText(level.name, 636, 288);
 
-  wrapText(level.line, 610, 350, 560, 36, 'rgba(215,230,220,0.82)', '19px "Microsoft YaHei", sans-serif');
+  wrapText(level.line, 640, 340, 540, 32, 'rgba(215,230,220,0.82)', '17px "Microsoft YaHei", sans-serif');
 
   // 目标
   ctx.fillStyle = 'rgba(255,225,150,0.85)';
   ctx.font = '15px "Microsoft YaHei", sans-serif';
-  ctx.fillText('目标：拾起 ' + level.motes.length + ' 缕光尘，走到终点', 610, 470);
+  ctx.fillText('目标：拾起 ' + level.motes.length + ' 缕光尘，走到终点', 640, 468);
 
   ctx.fillStyle = `rgba(255,240,190,${0.5 + 0.5 * Math.sin(tGlobal * 3)})`;
   ctx.font = '600 17px "Microsoft YaHei", sans-serif';
-  ctx.fillText('按 空格 / 手柄 A 继续', 610, 530);
+  ctx.fillText('按 空格 / 手柄任意键 继续', 640, 522);
 
   // 底部文化依据
   ctx.fillStyle = 'rgba(130,160,150,0.40)';
   ctx.font = '12px "Microsoft YaHei", sans-serif';
-  ctx.fillText('商代（前1600—前1046）· 1986 年广汉三星堆二号祭祀坑出土 · 三星堆博物馆藏', 610, 640);
+  ctx.fillText('商代（前1600—前1046）· 1986 年广汉三星堆二号祭祀坑出土 · 三星堆博物馆藏', 640, 620);
 }
 
 /* ================= 通关 ================= */
@@ -1906,27 +4807,61 @@ function drawEnding() {
 
   ctx.textAlign = 'center';
   ctx.fillStyle = '#efdba6';
-  ctx.font = '700 50px "Microsoft YaHei", serif';
-  ctx.fillText('它先是一团火', W / 2, 520);
+  ctx.font = '700 44px "Microsoft YaHei", serif';
+  ctx.fillText('三千年前，它是一张金面具', W / 2, 490);
 
-  ctx.fillStyle = 'rgba(225,205,160,0.85)';
+  ctx.fillStyle = 'rgba(225,205,160,0.90)';
   ctx.font = '19px "Microsoft YaHei", serif';
-  ctx.fillText('三千年前的一张脸，只为看你一眼。', W / 2, 562);
+  ctx.fillText('三千年后，铜身绿锈里，藏着那一瞬的金光。', W / 2, 524);
+
+  // 五行时间徽章：熔金 → 金光余温 → 金剥绿锈 → 出土尘灰 → 展柜残光
+  if (typeof ERA_ORDER !== 'undefined' && typeof ERA !== 'undefined') {
+    const y5 = 568;
+    const total = ERA_ORDER.length;
+    const pad = 90;
+    const cx0 = W / 2 - pad * (total - 1) / 2;
+    const eraDotColors = {
+      forge:  '#ffd060',
+      ritual: '#e0a050',
+      burial: '#9ac884',
+      dig:    '#a89878',
+      museum: '#98c8b0'
+    };
+    for (let i = 0; i < total; i++) {
+      const x = cx0 + i * pad;
+      // 连线
+      if (i > 0) {
+        ctx.strokeStyle = 'rgba(200,180,140,0.35)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(cx0 + (i - 1) * pad + 6, y5);
+        ctx.lineTo(x - 6, y5);
+        ctx.stroke();
+      }
+      ctx.beginPath();
+      ctx.arc(x, y5, 4.5, 0, Math.PI * 2);
+      ctx.fillStyle = eraDotColors[ERA_ORDER[i]] || '#ffffff';
+      ctx.fill();
+      ctx.fillStyle = 'rgba(220,200,150,0.75)';
+      ctx.font = '11px "Microsoft YaHei", sans-serif';
+      ctx.fillText(ERA[ERA_ORDER[i]].label, x, y5 + 22);
+    }
+  }
 
   ctx.fillStyle = 'rgba(150,180,170,0.55)';
   ctx.font = '12px "Microsoft YaHei", sans-serif';
-  ctx.fillText('文化依据：商代（前1600—前1046）；1986 年四川广汉三星堆二号祭祀坑出土；三星堆博物馆藏。', W / 2, 618);
-  ctx.fillText('艺术想象声明：铸造、祭祀、掩埋等情节为艺术演绎，非考古复原；造型依据馆方展签与展览海报二次创作。', W / 2, 638);
+  ctx.fillText('文化依据：商代（前1600—前1046）；1986 年四川广汉三星堆二号祭祀坑出土；三星堆博物馆藏。', W / 2, 640);
+  ctx.fillText('艺术想象声明：铸造、祭祀、掩埋等情节为艺术演绎，非考古复原；造型依据馆方展签与展览海报二次创作。', W / 2, 660);
 
   ctx.fillStyle = `rgba(255,240,190,${0.5 + 0.5 * Math.sin(tGlobal * 3)})`;
   ctx.font = '600 17px "Microsoft YaHei", sans-serif';
-  ctx.fillText('按 空格 重新开始', W / 2, 684);
+  ctx.fillText('按 空格 重新开始', W / 2, 700);
 }
 
 /* ================= 渲染 ================= */
 function render() {
-  if (state === 'title') { drawTitle(); drawPatina(); drawVignette(); drawFrame(); return; }
-  if (state === 'ending') { drawEnding(); drawPatina(); drawVignette(); drawFrame(); return; }
+  if (state === 'title') { drawTitle(); drawPatina(); drawVignette(); drawFrame(); drawSoundBtn(); return; }
+  if (state === 'ending') { drawEnding(); drawPatina(); drawVignette(); drawFrame(); drawSoundBtn(); return; }
 
   ctx.save();
   if (shakeT > 0) {
@@ -1959,6 +4894,7 @@ function render() {
   if (state === 'intro') drawIntro();
   if (state === 'clear') drawClear();
   drawExit();
+  drawSoundBtn();
 }
 
 /* ================= 主循环 ================= */
@@ -1971,13 +4907,23 @@ function frame(now) {
   const dt = Math.min(raw, 0.05);
   tGlobal += dt;
   stateT += dt;
+  if (player.goldFlash > 0) player.goldFlash = Math.max(0, player.goldFlash - dt);
 
   gatherInput();
 
+  // 音频可能被浏览器挂起（切标签页后也会挂起），一旦有过交互就自动恢复
+  if (audioStarted && audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+
+  // 每帧根据当前状态推送紧张度给氛围音系统
+  updateAmbience(dt);
+
   if (state !== 'title' && (pressed.has('Escape') || pad.backEdge)) toTitle();
 
+  // 静音开关（M 键，任意状态）
+  if (pressed.has('KeyM')) toggleMute();
+
   if (state === 'title') {
-    if (input.startEdge) { loadLevel(0); state = 'intro'; stateT = 0; }
+    if (input.startEdge) { loadLevel(0); state = 'intro'; stateT = 0; sfxStart(); }
   } else if (state === 'intro') {
     // 不再要求 stateT 阈值：过场刚出现的瞬间按键也会被接受，避免"按了没反应"
     if (input.startEdge) { state = 'play'; stateT = 0; acc = 0; }
@@ -1997,9 +4943,9 @@ function frame(now) {
   } else if (state === 'clear') {
     if (input.startEdge) {
       if (levelIdx < LEVELS.length - 1) {
-        loadLevel(levelIdx + 1); state = 'intro'; stateT = 0;
+        loadLevel(levelIdx + 1); state = 'intro'; stateT = 0; sfxStart();
       } else {
-        state = 'ending'; stateT = 0;
+        state = 'ending'; stateT = 0; sfxClear();
       }
     }
   } else if (state === 'ending') {
