@@ -1011,6 +1011,7 @@ function respawn() {
   player.inv = 1.0;
   player.hp = MAXHP;
   deathTimer = 0;
+  if (player._trail) player._trail.length = 0;
 }
 
 /* 受伤：扣血 + 无敌 + 击退；血量归零后整关重来 */
@@ -1287,6 +1288,8 @@ function step(dt) {
       collected++;
       sfxCoin();
       player.goldFlash = 1.8;
+      // 收集微震：比受伤震屏更轻微、更短促的正向反馈
+      shakeT = Math.max(shakeT, 0.10);
       for (let i = 0; i < 14; i++) {
         burst.push({
           x: m.x, y: m.y,
@@ -2227,6 +2230,45 @@ function drawBackground(theme) {
   else if (theme === 'burial') bgBurial();
   else if (theme === 'dig') bgDig();
   else bgMuseum();
+}
+
+/* ================= 环境飘尘层（各 era 主题色粒子，营造祭祀氛围） ================= */
+/* 用确定性种子生成 N 个粒子，每帧根据 tGlobal 计算位置；无状态，无需 update */
+function drawAmbientDust() {
+  const theme = level.theme;
+  const cfg = {
+    forge:  { count: 42, hue: '255,180,90', speed: 0.9, drift: 26, size: [1.2, 2.6], alpha: [0.12, 0.35] },
+    ritual: { count: 48, hue: '255,220,150', speed: 0.5, drift: 34, size: [1.0, 2.4], alpha: [0.10, 0.32] },
+    burial: { count: 40, hue: '160,200,140', speed: 0.35, drift: 40, size: [1.2, 2.8], alpha: [0.14, 0.38] },
+    dig:    { count: 54, hue: '220,190,130', speed: 0.55, drift: 22, size: [1.0, 2.2], alpha: [0.12, 0.36] },
+    museum: { count: 36, hue: '180,220,200', speed: 0.28, drift: 48, size: [1.4, 3.0], alpha: [0.10, 0.30] }
+  }[theme] || { count: 36, hue: '200,200,200', speed: 0.4, drift: 30, size: [1.2, 2.4], alpha: [0.12, 0.30] };
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < cfg.count; i++) {
+    // 确定性种子：每颗粒子有独立相位/大小/速度系数
+    const seed = i * 73.31 + 12.7;
+    const phaseX = tGlobal * cfg.speed * (0.6 + (i % 5) * 0.15);
+    const driftX = Math.sin(tGlobal * 0.35 + seed * 0.4) * cfg.drift;
+    const driftY = Math.cos(tGlobal * 0.28 + seed * 0.7) * cfg.drift * 0.6;
+    // 粒子在画面上的循环位置（水平视差 + 缓慢下落）
+    const baseX = ((i * 97) + (phaseX * 40) - cam.x * 0.15);
+    const wrapX = ((baseX % W) + W) % W;
+    const fall = ((tGlobal * 8 + seed * 3.7) % (H + 40));
+    const px = wrapX + driftX;
+    const py = (fall % H) + driftY;
+    if (py < -20 || py > H + 20) continue;
+    const sz = cfg.size[0] + ((i * 17) % 100) / 100 * (cfg.size[1] - cfg.size[0]);
+    // 呼吸亮度
+    const twinkle = 0.5 + 0.5 * Math.sin(tGlobal * 1.6 + seed);
+    const alpha = cfg.alpha[0] + (cfg.alpha[1] - cfg.alpha[0]) * twinkle;
+    ctx.fillStyle = `rgba(${cfg.hue},${alpha})`;
+    ctx.beginPath();
+    ctx.arc(px, py, sz, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 /* ================= 平台 ================= */
@@ -3861,8 +3903,8 @@ function drawHead(x, y, r, opt) {
   for (const side of [-1, 1]) {
     ctx.save();
     ctx.translate(side * r * 0.44, -r * 0.08);
-    // 旋转加大：0.30 → 0.50，让整只耳朵外侧（外尖）明显上翘
-    ctx.rotate(side * 0.50);
+    // 旋转再加大：0.50 → 0.62，让耳朵外侧（外尖）更明显上翘
+    ctx.rotate(side * 0.62);
     const eg = ctx.createLinearGradient(0, -r * 0.4, side * r * 0.6, r * 0.3);
     eg.addColorStop(0, patina[1]);
     eg.addColorStop(0.6, patina[0]);
@@ -3938,18 +3980,27 @@ function drawHead(x, y, r, opt) {
     ctx.clip();
 
     if (eraName === 'forge') {
-      // 熔金：炽热光斑 + 流动的熔纹
+      // 熔金：炽热光斑 + 流动的熔纹（多尺度层次：核心炽白 → 中层熔橙 → 边缘暗红）
       ctx.globalCompositeOperation = 'lighter';
-      const moltenGrad = ctx.createRadialGradient(-r * 0.2, -r * 0.2, r * 0.05, 0, 0, r * 1.0);
-      moltenGrad.addColorStop(0, 'rgba(255,255,220,0.65)');
-      moltenGrad.addColorStop(0.4, 'rgba(255,200,80,0.35)');
-      moltenGrad.addColorStop(1, 'rgba(255,120,20,0)');
-      ctx.fillStyle = moltenGrad;
+      // 核心炽白
+      const moltenCore = ctx.createRadialGradient(-r * 0.15, -r * 0.18, r * 0.02, -r * 0.1, -r * 0.15, r * 0.55);
+      moltenCore.addColorStop(0, 'rgba(255,255,235,0.85)');
+      moltenCore.addColorStop(0.35, 'rgba(255,240,180,0.55)');
+      moltenCore.addColorStop(1, 'rgba(255,200,80,0)');
+      ctx.fillStyle = moltenCore;
+      ctx.fillRect(-r, -r, r * 2, r * 2);
+      // 中层熔橙外圈
+      const moltenOuter = ctx.createRadialGradient(0, 0, r * 0.2, 0, 0, r * 1.1);
+      moltenOuter.addColorStop(0, 'rgba(255,180,60,0.35)');
+      moltenOuter.addColorStop(0.6, 'rgba(255,140,30,0.18)');
+      moltenOuter.addColorStop(1, 'rgba(200,60,10,0)');
+      ctx.fillStyle = moltenOuter;
       ctx.fillRect(-r, -r, r * 2, r * 2);
       // 熔流条纹
       ctx.globalCompositeOperation = 'source-over';
-      ctx.strokeStyle = 'rgba(255,180,60,0.5)';
-      ctx.lineWidth = r * 0.05;
+      // 暗红熔流（底色纹路）
+      ctx.strokeStyle = 'rgba(180,60,20,0.45)';
+      ctx.lineWidth = r * 0.09;
       for (let i = 0; i < 5; i++) {
         const y = -r * 0.6 + i * r * 0.22 + Math.sin(tGlobal * 3 + i) * r * 0.05;
         ctx.beginPath();
@@ -3957,26 +4008,62 @@ function drawHead(x, y, r, opt) {
         ctx.quadraticCurveTo(0, y + Math.sin(tGlobal * 2 + i * 0.7) * r * 0.08, r * 0.6, y);
         ctx.stroke();
       }
+      // 亮橙熔流（高光纹路）
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.strokeStyle = 'rgba(255,210,100,0.55)';
+      ctx.lineWidth = r * 0.03;
+      for (let i = 0; i < 5; i++) {
+        const y = -r * 0.6 + i * r * 0.22 + Math.sin(tGlobal * 3 + i) * r * 0.05 - r * 0.02;
+        ctx.beginPath();
+        ctx.moveTo(-r * 0.6, y);
+        ctx.quadraticCurveTo(0, y + Math.sin(tGlobal * 2 + i * 0.7) * r * 0.08, r * 0.6, y);
+        ctx.stroke();
+      }
+      ctx.globalCompositeOperation = 'source-over';
     } else if (eraName === 'ritual') {
-      // 金光余温：光斑脉动，铜身开始露出
+      // 金光余温：光斑脉动 + 铜身开始露出（多尺度层次：金斑亮核 + 铜色底斑 + 边缘锈色）
       ctx.globalCompositeOperation = 'lighter';
       const glowA = ctx.createRadialGradient(r * 0.1, -r * 0.2, r * 0.05, 0, 0, r * 1.0);
-      glowA.addColorStop(0, 'rgba(255,220,140,0.45)');
-      glowA.addColorStop(0.5, 'rgba(255,170,60,0.15)');
+      glowA.addColorStop(0, 'rgba(255,230,160,0.65)');
+      glowA.addColorStop(0.4, 'rgba(255,200,100,0.30)');
+      glowA.addColorStop(0.75, 'rgba(255,150,40,0.10)');
       glowA.addColorStop(1, 'rgba(255,120,20,0)');
       ctx.fillStyle = glowA;
       ctx.fillRect(-r, -r, r * 2, r * 2);
+      // 第二处金光呼吸（错相）
+      const glowB = ctx.createRadialGradient(-r * 0.3, r * 0.25, r * 0.03, -r * 0.3, r * 0.25, r * 0.6);
+      const pulseB = 0.5 + 0.5 * Math.sin(tGlobal * 1.7);
+      glowB.addColorStop(0, 'rgba(255,210,120,' + (0.35 * pulseB) + ')');
+      glowB.addColorStop(1, 'rgba(255,150,40,0)');
+      ctx.fillStyle = glowB;
+      ctx.fillRect(-r, -r, r * 2, r * 2);
       ctx.globalCompositeOperation = 'source-over';
-      // 铜色底层斑
+      // 铜色底层斑（大斑，模拟金剥落）
       ctx.fillStyle = E.bronze;
-      ctx.globalAlpha = 0.45;
+      ctx.globalAlpha = 0.55;
       ctx.beginPath();
-      ctx.ellipse(r * 0.3, -r * 0.15, r * 0.28, r * 0.32, 0.4, 0, Math.PI * 2);
+      ctx.ellipse(r * 0.3, -r * 0.15, r * 0.32, r * 0.36, 0.4, 0, Math.PI * 2);
       ctx.fill();
       ctx.beginPath();
-      ctx.ellipse(-r * 0.35, r * 0.3, r * 0.2, r * 0.18, -0.3, 0, Math.PI * 2);
+      ctx.ellipse(-r * 0.35, r * 0.3, r * 0.24, r * 0.22, -0.3, 0, Math.PI * 2);
       ctx.fill();
       ctx.globalAlpha = 1;
+      // 铜色斑内的深色纹理（金属氧化斑点）
+      ctx.fillStyle = 'rgba(30,50,35,0.35)';
+      ctx.beginPath();
+      ctx.ellipse(r * 0.32, -r * 0.14, r * 0.10, r * 0.08, 0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(-r * 0.32, r * 0.28, r * 0.08, r * 0.06, -0.4, 0, Math.PI * 2);
+      ctx.fill();
+      // 铜色斑的边缘高光（金光透过剥落处）
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.strokeStyle = 'rgba(255,220,140,0.35)';
+      ctx.lineWidth = r * 0.02;
+      ctx.beginPath();
+      ctx.ellipse(r * 0.3, -r * 0.15, r * 0.32, r * 0.36, 0.4, -0.6, 0.9);
+      ctx.stroke();
+      ctx.globalCompositeOperation = 'source-over';
     } else if (eraName === 'burial') {
       // 金剥绿锈：大面积孔雀绿锈斑 + 零星金箔残片（核心视觉）
       // 底层铜色
@@ -4004,8 +4091,18 @@ function drawHead(x, y, r, opt) {
         ctx.ellipse(s.x, s.y, s.rx * 1.2, s.ry * 1.2, 0, 0, Math.PI * 2);
         ctx.fill();
       }
-      // 残存金箔：亮金色小块 + 边缘光
+      // 绿锈中心更亮斑（晶体核心）
       ctx.globalCompositeOperation = 'lighter';
+      for (const s of rustSpots.slice(0, 3)) {
+        const rg2 = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.rx * 0.5);
+        rg2.addColorStop(0, 'rgba(180,240,200,' + (s.a * 0.35) + ')');
+        rg2.addColorStop(1, 'rgba(120,200,160,0)');
+        ctx.fillStyle = rg2;
+        ctx.beginPath();
+        ctx.ellipse(s.x, s.y, s.rx * 0.55, s.ry * 0.55, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // 残存金箔：亮金色小块 + 边缘光
       const flakes = [
         { x: -r * 0.05, y: -r * 0.55, w: r * 0.14, h: r * 0.09, a: 0.85 },
         { x: r * 0.14, y: -r * 0.10, w: r * 0.11, h: r * 0.08, a: 0.70 },
@@ -4022,12 +4119,22 @@ function drawHead(x, y, r, opt) {
         ctx.fill();
       }
       ctx.globalCompositeOperation = 'source-over';
+      // 铜锈边缘颗粒（细碎颗粒）
+      ctx.fillStyle = 'rgba(40,80,60,0.5)';
+      for (let i = 0; i < 12; i++) {
+        const px = Math.sin(i * 2.4) * r * 0.65;
+        const py = Math.cos(i * 1.7) * r * 0.55;
+        ctx.beginPath();
+        ctx.arc(px, py, r * 0.02, 0, Math.PI * 2);
+        ctx.fill();
+      }
     } else if (eraName === 'dig') {
-      // 出土：黄泥覆尘 + 极少量金屑微光
+      // 出土：黄泥覆尘 + 极少量金屑微光（多尺度：泥底 + 泥块 + 颗粒 + 湿泥暗斑）
+      // 底泥
       ctx.fillStyle = '#3a3220';
-      ctx.globalAlpha = 0.55;
+      ctx.globalAlpha = 0.6;
       ctx.fillRect(-r, -r, r * 2, r * 2);
-      // 泥块颗粒
+      // 泥块颗粒（较大，深色）
       ctx.globalAlpha = 0.75;
       ctx.fillStyle = '#2a2418';
       const pebbles = [
@@ -4041,48 +4148,81 @@ function drawHead(x, y, r, opt) {
         ctx.ellipse(p.x, p.y, p.s, p.s * 0.7, 0.3, 0, Math.PI * 2);
         ctx.fill();
       }
+      // 湿泥暗斑（更深色的湿泥土痕）
+      ctx.globalAlpha = 0.4;
+      ctx.fillStyle = '#1a1608';
+      for (let i = 0; i < 6; i++) {
+        const wx = Math.sin(i * 1.3 + 0.5) * r * 0.5;
+        const wy = Math.cos(i * 2.1 + 1.0) * r * 0.45;
+        ctx.beginPath();
+        ctx.ellipse(wx, wy, r * 0.12, r * 0.08, i * 0.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
       // 极微金光（记忆里仅剩的一丝）
       ctx.globalCompositeOperation = 'lighter';
       const faintGold = ctx.createRadialGradient(r * 0.15, -r * 0.35, 0, r * 0.15, -r * 0.35, r * 0.4);
-      faintGold.addColorStop(0, 'rgba(255,220,140,0.20)');
+      faintGold.addColorStop(0, 'rgba(255,220,140,0.28)');
+      faintGold.addColorStop(0.6, 'rgba(255,180,80,0.10)');
       faintGold.addColorStop(1, 'rgba(255,180,80,0)');
       ctx.fillStyle = faintGold;
       ctx.fillRect(-r, -r, r * 2, r * 2);
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
     } else {
-      // museum：展柜绿锈稳定，偶有金光记忆闪过
+      // museum：展柜绿锈稳定，偶有金光记忆闪过（多尺度：铜底 + 稳定锈 + 晶体亮斑 + 展柜冷光反射 + 呼吸金光）
+      // 铜色底斑
       ctx.fillStyle = E.bronze;
-      ctx.globalAlpha = 0.5;
+      ctx.globalAlpha = 0.55;
       ctx.beginPath();
-      ctx.ellipse(r * 0.32, -r * 0.12, r * 0.24, r * 0.3, 0.4, 0, Math.PI * 2);
+      ctx.ellipse(r * 0.32, -r * 0.12, r * 0.28, r * 0.34, 0.4, 0, Math.PI * 2);
       ctx.fill();
       ctx.beginPath();
-      ctx.ellipse(-r * 0.38, r * 0.32, r * 0.18, r * 0.16, -0.3, 0, Math.PI * 2);
+      ctx.ellipse(-r * 0.38, r * 0.32, r * 0.22, r * 0.20, -0.3, 0, Math.PI * 2);
       ctx.fill();
-      // 稳定绿锈斑
-      ctx.globalAlpha = 0.42;
+      // 稳定绿锈斑（大）
+      ctx.globalAlpha = 0.48;
       ctx.fillStyle = '#5a8c68';
       ctx.beginPath();
-      ctx.ellipse(-r * 0.2, -r * 0.45, r * 0.26, r * 0.14, 0.2, 0, Math.PI * 2);
+      ctx.ellipse(-r * 0.2, -r * 0.45, r * 0.28, r * 0.16, 0.2, 0, Math.PI * 2);
       ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(r * 0.15, r * 0.45, r * 0.24, r * 0.12, -0.4, 0, Math.PI * 2);
+      ctx.fill();
+      // 绿锈晶体亮斑（展柜灯下的反射高光）
+      ctx.globalCompositeOperation = 'lighter';
+      const crystalSpots = [
+        { x: -r * 0.22, y: -r * 0.44, s: r * 0.08, a: 0.28 },
+        { x: r * 0.20, y: r * 0.42, s: r * 0.07, a: 0.22 },
+        { x: -r * 0.10, y: -r * 0.30, s: r * 0.05, a: 0.18 }
+      ];
+      for (const cs of crystalSpots) {
+        const cg2 = ctx.createRadialGradient(cs.x, cs.y, 0, cs.x, cs.y, cs.s);
+        cg2.addColorStop(0, 'rgba(200,240,220,' + cs.a + ')');
+        cg2.addColorStop(1, 'rgba(150,220,180,0)');
+        ctx.fillStyle = cg2;
+        ctx.beginPath();
+        ctx.arc(cs.x, cs.y, cs.s, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
       // 记忆金光：极缓慢的呼吸式微光（每 ~6 秒闪一次）
       const memPhase = (Math.sin(tGlobal * 0.6) + 1) * 0.5; // 0..1
-      const memGlow = Math.pow(memPhase, 4) * 0.35; // 只在峰值附近亮起
+      const memGlow = Math.pow(memPhase, 4) * 0.4; // 只在峰值附近亮起
       if (memGlow > 0.02) {
         ctx.globalCompositeOperation = 'lighter';
-        const mem = ctx.createRadialGradient(-r * 0.15, -r * 0.25, 0, -r * 0.15, -r * 0.25, r * 0.5);
-        mem.addColorStop(0, 'rgba(255,225,150,' + memGlow + ')');
+        const mem = ctx.createRadialGradient(-r * 0.15, -r * 0.25, 0, -r * 0.15, -r * 0.25, r * 0.55);
+        mem.addColorStop(0, 'rgba(255,235,170,' + memGlow + ')');
+        mem.addColorStop(0.5, 'rgba(255,200,100,' + (memGlow * 0.5) + ')');
         mem.addColorStop(1, 'rgba(255,180,80,0)');
         ctx.fillStyle = mem;
         ctx.fillRect(-r, -r, r * 2, r * 2);
         ctx.globalCompositeOperation = 'source-over';
       }
-      ctx.globalAlpha = 1;
     }
     ctx.restore();
 
-    /* --- 粗重眉骨（宽扁眉翼，贴宽脸边缘） --- */
+    /* --- 粗重眉骨（宽扁眉翼，贴宽脸边缘；加描边+高光强化眉骨立体感） --- */
     ctx.fillStyle = E.patinaColor;
     ctx.beginPath();
     ctx.moveTo(-r * 0.56, -r * 0.22);
@@ -4098,6 +4238,28 @@ function drawHead(x, y, r, opt) {
     ctx.quadraticCurveTo(r * 0.30, -r * 0.22, r * 0.56, -r * 0.12);
     ctx.closePath();
     ctx.fill();
+    // 眉骨上沿高光（金属反光，强化眉骨凸起感）
+    ctx.strokeStyle = 'rgba(255,220,150,0.35)';
+    ctx.lineWidth = Math.max(1, r * 0.03);
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.54, -r * 0.23);
+    ctx.quadraticCurveTo(-r * 0.30, -r * 0.34, -r * 0.08, -r * 0.21);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(r * 0.54, -r * 0.23);
+    ctx.quadraticCurveTo(r * 0.30, -r * 0.34, r * 0.08, -r * 0.21);
+    ctx.stroke();
+    // 眉骨下沿阴影刻线（强化"压迫感"）
+    ctx.strokeStyle = 'rgba(8,20,16,0.55)';
+    ctx.lineWidth = Math.max(1, r * 0.04);
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.54, -r * 0.11);
+    ctx.quadraticCurveTo(-r * 0.30, -r * 0.21, -r * 0.08, -r * 0.09);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(r * 0.54, -r * 0.11);
+    ctx.quadraticCurveTo(r * 0.30, -r * 0.21, r * 0.08, -r * 0.09);
+    ctx.stroke();
 
     /* --- 纵目（圆柱凸出眼球——三星堆面具的标志性特征） --- */
     const eyeOpen = 1 - blink;
@@ -4122,8 +4284,8 @@ function drawHead(x, y, r, opt) {
         const eyeRad = r * 0.11 * (0.55 + 0.45 * eyeOpen);
         const eyeBaseX = side * r * 0.18;   // 内端贴鼻梁
         const eyeTipX = side * r * 0.52;    // 外端突出到脸边缘
-        // 关键：外端抬高 0.05r——三星堆"内低外高"的神秘感（斜度约 8.4°）
-        const tipLift = r * 0.05;
+        // 关键：外端抬高 0.07r——三星堆"内低外高"的神秘感（斜度约 10°）
+        const tipLift = r * 0.07;
         const eyeTipY = eyeY - tipLift;
         const eg = ctx.createLinearGradient(0, eyeY - eyeRad, 0, eyeY + eyeRad);
         eg.addColorStop(0, '#e8dcc0');
@@ -4164,13 +4326,26 @@ function drawHead(x, y, r, opt) {
         ctx.moveTo(eyeBaseX, eyeY - eyeRad);
         ctx.lineTo(eyeTipX, eyeTipY - eyeRad);
         ctx.stroke();
+        // 眼柱上缘金属高光（金属反光带，强化圆柱体积感）
+        ctx.strokeStyle = 'rgba(255,235,180,0.38)';
+        ctx.lineWidth = Math.max(1, r * 0.018);
+        ctx.beginPath();
+        ctx.moveTo(eyeBaseX + side * r * 0.02, eyeY - eyeRad * 0.7);
+        ctx.lineTo(eyeTipX + side * r * 0.01, eyeTipY - eyeRad * 0.7);
+        ctx.stroke();
+        // 眼球面外圈描边（强化轮廓与神秘感）
+        ctx.strokeStyle = 'rgba(8,20,16,0.55)';
+        ctx.lineWidth = Math.max(1, r * 0.022);
+        ctx.beginPath();
+        ctx.ellipse(eyeTipX, eyeTipY, eyeRad * 0.72, eyeRad, 0, 0, Math.PI * 2);
+        ctx.stroke();
       } else {
-        // 闭眼：一条微微斜向上的刻线（与睁眼斜度一致）
+        // 闭眼：一条斜向上的刻线（外端抬高 0.07r，与睁眼斜度一致）
         ctx.strokeStyle = eyeLineColors[eraName] || 'rgba(150,215,185,0.55)';
         ctx.lineWidth = Math.max(1, r * 0.04);
         ctx.beginPath();
         ctx.moveTo(side * r * 0.18, -r * 0.02);
-        ctx.lineTo(side * r * 0.52, -r * 0.07);
+        ctx.lineTo(side * r * 0.52, -r * 0.09);
         ctx.stroke();
       }
     }
@@ -4224,6 +4399,11 @@ function drawPlayer() {
   const px = player.x - cam.x;
   const py = player.y;
 
+  // 拖尾轨迹：维护一个短历史缓冲，用于金色/加速残影
+  if (!player._trail) player._trail = [];
+  player._trail.push({ x: px, y: py });
+  if (player._trail.length > 10) player._trail.shift();
+
   // 落地阴影
   let floorY = py + 240;
   for (const pl of level.plats) {
@@ -4242,15 +4422,48 @@ function drawPlayer() {
   ctx.restore();
 
   // 青铜头像本体
-  const tilt = clamp(player.vx / SPEED, -1, 1) * 0.11;
+  // 头部摆动惯性：基于水平速度做低通滤波，避免转向时生硬跳跃
+  if (player._tiltS === undefined) player._tiltS = 0;
+  const tiltTarget = clamp(player.vx / SPEED, -1, 1) * 0.11;
+  player._tiltS += (tiltTarget - player._tiltS) * 0.18;
+  const tilt = player._tiltS;
+  // 行走节奏：脚步频率随速度线性增加；空中静止（无 bob）
+  const speedK = Math.min(1, Math.abs(player.vx) / SPEED);
   const bob = player.grounded && Math.abs(player.vx) > 40
-    ? Math.sin(tGlobal * 12) * 0.02 : 0;
-  const blink = Math.sin(tGlobal * 1.1) > 0.972 ? 1 : 0;
+    ? Math.sin(tGlobal * (8 + speedK * 6)) * (0.015 + speedK * 0.025)
+    : 0;
+  // 跳跃头部姿态：上升略仰头、下落略低头（增加跳跃的立体感）
+  const airPose = player.grounded ? 0 : clamp(-player.vy / 500, -0.06, 0.06);
+  // 眨眼非均匀：主眨眼慢（1.1Hz），偶发快眨（叠加 0.55Hz 微频）
+  const blinkMain = Math.sin(tGlobal * 1.1) > 0.972 ? 1 : 0;
+  const blinkQuick = Math.sin(tGlobal * 0.55 + 1.3) > 0.985 ? 1 : 0;
+  const blink = Math.max(blinkMain, blinkQuick);
+
+  // 金色拖尾（加速时更明显）：沿轨迹方向画一层淡金色残影
+  // 触发条件：goldFlash > 0（收集后）或 水平速度 > 70% SPEED（高速移动）
+  const trailStrength = Math.max(player.goldFlash || 0, Math.max(0, speedK - 0.55) * 1.4);
+  if (trailStrength > 0.02 && player._trail.length > 2) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const trLen = player._trail.length;
+    for (let i = 0; i < trLen - 1; i++) {
+      const p = player._trail[i];
+      const t = i / trLen; // 0=最旧，1=最新
+      const a = trailStrength * (1 - t) * 0.28;
+      if (a < 0.01) continue;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = player.goldFlash > 0 ? '#ffe8a8' : '#b8e6cc';
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y, player.r * 0.55 * (0.5 + 0.5 * t), player.r * 0.42 * (0.5 + 0.5 * t), 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
 
   ctx.save();
   ctx.globalAlpha = player.inv > 0 ? 0.55 : 1;
   drawHead(px, py, player.r, {
-    angle: tilt,
+    angle: tilt + airPose,
     sx: player.sx,
     sy: player.sy + bob,
     blink: blink,
@@ -4295,9 +4508,16 @@ function drawPlayer() {
 /* ================= HUD ================= */
 function drawHUD() {
   ctx.textAlign = 'left';
-  ctx.fillStyle = 'rgba(235,225,195,0.92)';
+  // 关卡名（带阴影 + 微弱金色发光）
   ctx.font = '600 22px "Microsoft YaHei", sans-serif';
+  ctx.shadowColor = 'rgba(0,0,0,0.75)';
+  ctx.shadowBlur = 6;
+  ctx.shadowOffsetY = 1;
+  ctx.fillStyle = 'rgba(235,225,195,0.95)';
   ctx.fillText(level.name, 40, 52);
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetY = 0;
 
   // 时代徽章：显示面具当前在"金→三千年→青铜锈迹"时间轴上的位置
   const eraName = ERA_ORDER[levelIdx];
@@ -4314,11 +4534,23 @@ function drawHUD() {
   const ec = eraColors[eraName] || eraColors.museum;
   const bx = 55, by = 66, bw = 445, bh = 40;
   ctx.save();
-  ctx.fillStyle = 'rgba(6,12,10,0.55)';
+  // 背景：深色 + 顶下边缘的金色微渐变（顶部亮、底部暗）
+  const badgeG = ctx.createLinearGradient(0, by, 0, by + bh);
+  badgeG.addColorStop(0, 'rgba(20,30,26,0.72)');
+  badgeG.addColorStop(0.5, 'rgba(6,12,10,0.55)');
+  badgeG.addColorStop(1, 'rgba(0,0,0,0.40)');
+  ctx.fillStyle = badgeG;
   ctx.fillRect(bx, by, bw, bh);
   ctx.strokeStyle = ec.border;
   ctx.lineWidth = 1;
   ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
+  // 顶部高光线（金属感）
+  ctx.strokeStyle = 'rgba(255,235,180,0.22)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(bx + 1, by + 1);
+  ctx.lineTo(bx + bw - 1, by + 1);
+  ctx.stroke();
   // 顶部标题
   ctx.fillStyle = 'rgba(210,190,140,0.72)';
   ctx.font = '600 10px "Microsoft YaHei", sans-serif';
@@ -4357,10 +4589,21 @@ function drawHUD() {
     ctx.arc(dotX, axY, cur ? 6 : (past ? 4.2 : 3), 0, Math.PI * 2);
     ctx.fillStyle = cur ? ec.text : (past ? 'rgba(200,180,130,0.7)' : 'rgba(200,200,200,0.22)');
     ctx.fill();
-    // 当前时代外圈
+    // 当前时代外圈（带呼吸脉冲：外圈呼吸缩放 + 内圈静态）
     if (cur) {
+      // 呼吸光环（半径 10-14 之间呼吸）
+      const pulseR = 10 + Math.sin(tGlobal * 2.2) * 2.0;
+      const pulseA = 0.35 + 0.25 * (0.5 + 0.5 * Math.sin(tGlobal * 2.2));
+      ctx.globalAlpha = pulseA;
+      ctx.strokeStyle = ec.text;
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.arc(dotX, axY, 10, 0, Math.PI * 2);
+      ctx.arc(dotX, axY, pulseR, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      // 内圈固定环
+      ctx.beginPath();
+      ctx.arc(dotX, axY, 9, 0, Math.PI * 2);
       ctx.strokeStyle = ec.text;
       ctx.lineWidth = 1.5;
       ctx.stroke();
@@ -4406,10 +4649,33 @@ function drawHUD() {
   ctx.font = '600 15px "Microsoft YaHei", sans-serif';
   ctx.fillText('光尘 ' + collected + ' / ' + level.motes.length, 40, 162);
   for (let i = 0; i < level.motes.length; i++) {
-    ctx.beginPath();
-    ctx.arc(146 + i * 18, 157, 4.5, 0, Math.PI * 2);
-    ctx.fillStyle = i < collected ? '#ffe9a8' : 'rgba(255,255,255,0.16)';
-    ctx.fill();
+    const got = i < collected;
+    const cx = 146 + i * 18, cy = 157;
+    if (got) {
+      // 已收集：呼吸金色外发光（每颗错相，形成节奏感）
+      const pulse = 0.5 + 0.5 * Math.sin(tGlobal * 3 + i * 0.6);
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.beginPath();
+      ctx.arc(cx, cy, 4.5 + pulse * 3, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,220,130,' + (0.10 + 0.10 * pulse) + ')';
+      ctx.fill();
+      ctx.globalCompositeOperation = 'source-over';
+      // 核心
+      ctx.beginPath();
+      ctx.arc(cx, cy, 4.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffe9a8';
+      ctx.fill();
+      // 高光点
+      ctx.beginPath();
+      ctx.arc(cx - 1.2, cy - 1.4, 1.4, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,230,0.9)';
+      ctx.fill();
+    } else {
+      ctx.beginPath();
+      ctx.arc(cx, cy, 4.5, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.16)';
+      ctx.fill();
+    }
   }
 
   // 生命
@@ -4511,14 +4777,44 @@ function drawTitle() {
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, W, H);
 
-  // 铜锈纹理点缀
-  for (let i = 0; i < 30; i++) {
+  // 铜锈纹理点缀（柔和底光，静态）
+  for (let i = 0; i < 18; i++) {
     const x = (i * 317) % W, y = (i * 197) % H;
-    ctx.fillStyle = `rgba(90,180,140,${0.02 + (i % 3) * 0.012})`;
+    ctx.fillStyle = `rgba(90,180,140,${0.018 + (i % 3) * 0.010})`;
     ctx.beginPath();
-    ctx.arc(x, y, 30 + (i % 4) * 22, 0, Math.PI * 2);
+    ctx.arc(x, y, 34 + (i % 4) * 24, 0, Math.PI * 2);
     ctx.fill();
   }
+
+  // 动态飘尘：标题页用"金+绿"双色粒子，营造"金面具被时光剥落"的氛围
+  // 确定性种子生成，无状态、无需 update
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const dustCount = 55;
+  for (let i = 0; i < dustCount; i++) {
+    const seed = i * 73.31 + 12.7;
+    const isGold = i % 3 !== 0; // 2/3 金色、1/3 铜锈绿
+    const phaseX = tGlobal * (0.4 + (i % 5) * 0.10) * (isGold ? 0.7 : 1.0);
+    const driftX = Math.sin(tGlobal * 0.30 + seed * 0.4) * 30;
+    const driftY = Math.cos(tGlobal * 0.22 + seed * 0.7) * 22;
+    const baseX = ((i * 97) + (phaseX * 40));
+    const wrapX = ((baseX % W) + W) % W;
+    const fall = ((tGlobal * 6 + seed * 3.7) % (H + 60));
+    const px = wrapX + driftX;
+    const py = (fall % H) + driftY - 30;
+    if (py < -20 || py > H + 20) continue;
+    const sz = 1.0 + ((i * 17) % 100) / 100 * 1.8;
+    const twinkle = 0.5 + 0.5 * Math.sin(tGlobal * 1.8 + seed);
+    const alpha = 0.10 + 0.24 * twinkle;
+    const col = isGold
+      ? `rgba(255,220,140,${alpha})`
+      : `rgba(150,210,160,${alpha * 0.7})`;
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(px, py, sz, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
 
   ctx.textAlign = 'center';
   ctx.fillStyle = '#e8d4a0';
@@ -4644,6 +4940,17 @@ function drawIntro() {
   else if (evolveProgress < 0.86) evolveEra = 'dig';
   else                            evolveEra = 'museum';
 
+  // era 边界值：距离最近边界的"过渡强度"——跨越瞬间 halo 最强，随即衰减
+  const ERA_BOUNDS = [0.20, 0.42, 0.64, 0.86];
+  let nearestBoundaryDist = 1;
+  for (const b of ERA_BOUNDS) {
+    const d = Math.abs(evolveProgress - b);
+    if (d < nearestBoundaryDist) nearestBoundaryDist = d;
+  }
+  // 过渡带宽度 0.06，超出即视为"稳态"；过渡中 halo 从 1→0 衰减
+  const transitionBand = 0.06;
+  const transitionK = Math.max(0, 1 - nearestBoundaryDist / transitionBand);
+
   const evolveLabelMap = {
     forge:  { name: '熔金为器',    t0: '约 前 1600', color: '#ffe0a0' },
     ritual: { name: '祭天通神',    t0: '前 1300—1046', color: '#f0c684' },
@@ -4693,17 +5000,68 @@ function drawIntro() {
   const hdX = 300, hdY = 360;
   const hdR = 82;
 
+  // 各 era 底部辉光颜色（RGB 元组），便于在时代边界做线性插值
+  const evolveGlowRGB = {
+    forge:  [255, 180, 80],
+    ritual: [255, 160, 70],
+    burial: [140, 180, 120],
+    dig:    [220, 200, 150],
+    museum: [160, 210, 180]
+  };
+  const eraOrderIdx = { forge: 0, ritual: 1, burial: 2, dig: 3, museum: 4 };
+  // 若正处于两次时代之间的过渡带内，把当前 era 颜色与"下一个 era"颜色按比例插值，避免硬切换
+  let curRGB = evolveGlowRGB[evolveEra];
+  if (transitionK > 0) {
+    // 找到当前 era 在演进序中的下一个（若已是最后则插回"当前"，即无插值）
+    const curIdx = eraOrderIdx[evolveEra];
+    const nextIdx = Math.min(4, curIdx + 1);
+    if (nextIdx !== curIdx) {
+      const nextRGB = evolveGlowRGB[ERA_ORDER[nextIdx]];
+      const t = transitionK; // 0..1
+      curRGB = [
+        curRGB[0] + (nextRGB[0] - curRGB[0]) * t,
+        curRGB[1] + (nextRGB[1] - curRGB[1]) * t,
+        curRGB[2] + (nextRGB[2] - curRGB[2]) * t
+      ];
+    }
+  }
+  const glowAlpha = 0.20 + 0.15 * transitionK; // 过渡时略亮
+  const glowColor = `rgba(${curRGB[0] | 0},${curRGB[1] | 0},${curRGB[2] | 0},${glowAlpha.toFixed(3)})`;
+
   // 底部辉光
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  const evolveGlowColors = {
-    forge:  'rgba(255,180,80,0.35)',
-    ritual: 'rgba(255,160,70,0.25)',
-    burial: 'rgba(140,180,120,0.18)',
-    dig:    'rgba(220,200,150,0.22)',
-    museum: 'rgba(160,210,180,0.20)'
-  };
-  radialGlow(hdX, hdY, hdR * 2.6, evolveGlowColors[evolveEra]);
+  radialGlow(hdX, hdY, hdR * 2.6, glowColor);
+
+  // 过渡爆发 halo：跨越时代瞬间，在面具外圈扩散一圈柔和的模糊光晕
+  if (transitionK > 0.02) {
+    // halo 半径随 transitionK 从 1→0 时向外扩张并淡出
+    const haloR = hdR * (1.4 + (1 - transitionK) * 2.2);
+    const haloAlpha = transitionK * 0.42;
+    // 用径向渐变绘制柔化边缘的模糊光晕
+    const haloG = ctx.createRadialGradient(hdX, hdY, hdR * 0.9, hdX, hdY, haloR);
+    haloG.addColorStop(0, `rgba(${curRGB[0] | 0},${curRGB[1] | 0},${curRGB[2] | 0},${(haloAlpha * 0.5).toFixed(3)})`);
+    haloG.addColorStop(0.6, `rgba(${curRGB[0] | 0},${curRGB[1] | 0},${curRGB[2] | 0},${(haloAlpha * 0.22).toFixed(3)})`);
+    haloG.addColorStop(1, `rgba(${curRGB[0] | 0},${curRGB[1] | 0},${curRGB[2] | 0},0)`);
+    ctx.fillStyle = haloG;
+    ctx.fillRect(hdX - haloR, hdY - haloR, haloR * 2, haloR * 2);
+
+    // 过渡瞬间的"金光飞尘"—— 沿 halo 圆周散布的小粒子，增强"时代翻篇"的仪式感
+    const sparkCount = 10;
+    for (let i = 0; i < sparkCount; i++) {
+      const seed = i * 73.31 + 91.2;
+      const ang = (i / sparkCount) * Math.PI * 2 + stateT * 0.3;
+      const sR = haloR * (0.75 + (i % 3) * 0.08);
+      const px = hdX + Math.cos(ang) * sR;
+      const py = hdY + Math.sin(ang) * sR * 0.85;
+      const twinkle = 0.5 + 0.5 * Math.sin(stateT * 3 + seed);
+      const sAlpha = transitionK * (0.20 + 0.35 * twinkle);
+      ctx.fillStyle = `rgba(${curRGB[0] | 0},${curRGB[1] | 0},${curRGB[2] | 0},${sAlpha.toFixed(3)})`;
+      ctx.beginPath();
+      ctx.arc(px, py, 1.4 + twinkle * 1.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
   ctx.restore();
 
   drawHead(hdX, hdY, hdR, {
@@ -4779,10 +5137,53 @@ function drawIntro() {
 function drawClear() {
   ctx.fillStyle = 'rgba(4,9,8,0.86)';
   ctx.fillRect(0, 0, W, H);
+
+  // 金色粒子上升：通关时的"金尘归位"意象
+  // 确定性种子 + 按 stateT 推进，进入本页即开始上升；无状态
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const PART = 60;
+  const localT = stateT; // 通关页内从 0 开始计时
+  for (let i = 0; i < PART; i++) {
+    const seed = i * 73.31 + 42.1;
+    const laneX = (i * 97.13) % W;
+    // 竖向速度略有差异，形成错落上升的层次感
+    const speed = 22 + ((i * 13) % 30); // 22..52 px/s
+    const riseT = (localT * speed + seed * 5.0) % (H + 80);
+    const x = laneX + Math.sin(localT * 0.6 + seed * 0.35) * 18;
+    const y = H + 30 - riseT; // 从底往上走
+    if (y < -20) continue;
+    // 顶部渐隐、底部渐隐：只在中间段亮起来
+    const lifeT = Math.min(1, riseT / 200) * Math.min(1, (H + 40 - riseT) / 200);
+    const twinkle = 0.5 + 0.5 * Math.sin(localT * 2.2 + seed);
+    const alpha = lifeT * (0.18 + 0.30 * twinkle);
+    const sz = 1.0 + ((i * 17) % 100) / 100 * 1.8;
+    ctx.fillStyle = `rgba(255,220,140,${alpha})`;
+    ctx.beginPath();
+    ctx.arc(x, y, sz, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  // 中心金色呼吸光：呼应"金面具归位"
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const pulseR = 260 + Math.sin(localT * 1.6) * 20;
+  const g = ctx.createRadialGradient(W / 2, 320, 20, W / 2, 320, pulseR);
+  g.addColorStop(0, 'rgba(255,220,140,0.14)');
+  g.addColorStop(1, 'rgba(255,220,140,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+
   ctx.textAlign = 'center';
   ctx.fillStyle = '#f4e4b8';
   ctx.font = '700 46px "Microsoft YaHei", serif';
+  ctx.shadowColor = 'rgba(255,210,120,0.55)';
+  ctx.shadowBlur = 12;
   ctx.fillText('第 ' + (levelIdx + 1) + ' 关 · 通过', W / 2, 300);
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
   ctx.fillStyle = 'rgba(200,230,215,0.8)';
   ctx.font = '18px "Microsoft YaHei", sans-serif';
   ctx.fillText(level.line, W / 2, 356);
@@ -4870,6 +5271,7 @@ function render() {
   }
 
   drawBackground(level.theme);
+  drawAmbientDust();
   drawArtifactGhost(0.075, H * 1.55, level.width * 0.16);
   drawArtifactGhost(0.055, H * 1.15, level.width * 0.60);
   drawPlatforms();
