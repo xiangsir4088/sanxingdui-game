@@ -320,6 +320,19 @@ cv.addEventListener('pointerdown', e => {
   if (IN_IFRAME && state === 'title' && inOpen(p)) { window.open(location.href, '_blank'); return; }
   // 标题页：点击"选关"按钮进入选关菜单（优先于下方"按空格开始"）
   if (state === 'title' && inSelBtn(p)) { state = 'levelSelect'; stateT = 0; sfxBack(); return; }
+  // P3.2 难度选择按钮点击检测
+  if (state === 'title') {
+    const diffKeys = ['easy', 'normal', 'hard'];
+    const diffXs = [W/2 - 110, W/2 - 20, W/2 + 70];
+    for (let i = 0; i < 3; i++) {
+      const bx = diffXs[i] - 30, by = 594, bw = 60, bh = 28;
+      if (p.x >= bx && p.x <= bx + bw && p.y >= by && p.y <= by + bh) {
+        setDifficulty(diffKeys[i]);
+        sfxBack();
+        return;
+      }
+    }
+  }
   // 选关：优先于"按空格开始"，避免误触发
   if (state === 'levelSelect') {
     for (let i = 0; i < 5; i++) {
@@ -1461,7 +1474,28 @@ const motes = [];
 let burst = [];
 
 /* ---- 生命 / 死亡 ---- */
-const MAXHP = 2;
+// P3.2 难度选择系统：三档难度影响 HP、预警时间、安全窗
+const DIFFICULTIES = {
+  easy:    { name: '简单', maxHP: 3, warnScale: 1.3, safeScale: 1.3, speedScale: 0.9 },
+  normal:  { name: '普通', maxHP: 2, warnScale: 1.0, safeScale: 1.0, speedScale: 1.0 },
+  hard:    { name: '困难', maxHP: 1, warnScale: 0.7, safeScale: 0.7, speedScale: 1.15 }
+};
+let currentDifficulty = 'normal';
+let MAXHP = 2;  // 运行时根据难度动态设置
+
+function setDifficulty(d) {
+  if (!DIFFICULTIES[d]) d = 'normal';
+  currentDifficulty = d;
+  MAXHP = DIFFICULTIES[d].maxHP;
+  // 持久化
+  try { localStorage.setItem('sdx_difficulty', d); } catch(e) {}
+}
+
+// 从存档恢复难度
+try {
+  const saved = localStorage.getItem('sdx_difficulty');
+  if (saved && DIFFICULTIES[saved]) setDifficulty(saved);
+} catch(e) {}
 let haz = [];
 let hurtFlash = 0, deathTimer = 0, shakeT = 0;
 
@@ -1533,6 +1567,66 @@ function levelStart(i) {
   sfxStart();
 }
 
+// ========== 性能优化 P3.1：渐变预烘焙 Sprite Cache ==========
+// 将 drawHazards() 中每帧重建的 5 个渐变对象预烘焙为离屏 canvas，
+// 避免 5 根激光 × 25 个渐变/帧的重复创建。
+const SPRITE_CACHE = {};
+
+function initLaserSprites() {
+  if (SPRITE_CACHE._laserDone) return;
+  SPRITE_CACHE._laserDone = true;
+
+  // 1. 灯体（金属圆柱，32×18）
+  const bodyC = document.createElement('canvas');
+  bodyC.width = 32; bodyC.height = 18;
+  const bodyX = bodyC.getContext('2d');
+  const bg = bodyX.createLinearGradient(0, 0, 32, 0);
+  bg.addColorStop(0, '#0f0b08');
+  bg.addColorStop(0.35, '#4a3d2c');
+  bg.addColorStop(0.55, '#6a5942');
+  bg.addColorStop(1, '#140f0a');
+  bodyX.fillStyle = bg;
+  bodyX.fillRect(0, 0, 32, 18);
+
+  // 2. 灯头（发光透镜，26×11）
+  const lensC = document.createElement('canvas');
+  lensC.width = 26; lensC.height = 11;
+  const lensX = lensC.getContext('2d');
+  lensX.globalCompositeOperation = 'lighter';
+  const lg = lensX.createRadialGradient(13, 5, 1, 13, 5, 13);
+  lg.addColorStop(0, 'rgba(255,252,220,1)');
+  lg.addColorStop(0.45, 'rgba(255,232,160,0.9)');
+  lg.addColorStop(1, 'rgba(255,180,60,0)');
+  lensX.fillStyle = lg;
+  lensX.beginPath();
+  lensX.ellipse(13, 5, 13, 5.5, 0, 0, Math.PI * 2);
+  lensX.fill();
+  // 中心亮点
+  lensX.fillStyle = 'rgba(255,255,240,0.95)';
+  lensX.beginPath();
+  lensX.ellipse(13, 4.5, 5, 2, 0, 0, Math.PI * 2);
+  lensX.fill();
+
+  // 3. 地面光池（140×28）
+  const poolC = document.createElement('canvas');
+  poolC.width = 140; poolC.height = 28;
+  const poolX = poolC.getContext('2d');
+  poolX.globalCompositeOperation = 'lighter';
+  const pg = poolX.createRadialGradient(70, 14, 4, 70, 14, 68);
+  pg.addColorStop(0, 'rgba(255,244,200,0.6)');
+  pg.addColorStop(0.5, 'rgba(255,210,130,0.22)');
+  pg.addColorStop(1, 'rgba(255,180,80,0)');
+  poolX.fillStyle = pg;
+  poolX.beginPath();
+  poolX.ellipse(70, 14, 70, 14, 0, 0, Math.PI * 2);
+  poolX.fill();
+
+  SPRITE_CACHE.laser = { body: bodyC, lens: lensC, pool: poolC };
+}
+
+// 游戏启动时初始化
+initLaserSprites();
+
 function loadLevel(i) {
   levelIdx = i;
   level = LEVELS[i];
@@ -1553,6 +1647,11 @@ function loadLevel(i) {
   burst = [];
   haz = (level.hazards || []).map((h, hi) => {
     const c = Object.assign({}, h, { rect: null, cur: 0, firing: false });
+    // P3.2 难度缩放：预警/激活/安全窗按难度比例调整
+    const diff = DIFFICULTIES[currentDifficulty];
+    c.warn = h.warn * diff.warnScale;
+    c.on = h.on * diff.warnScale;  // 激活时间也缩放（困难更短预警更紧凑）
+    c.off = h.off * diff.safeScale;
     // rock 专属：每块土块形态都不同（真夯土块从坑壁脱落，形状不规则）
     if (h.t === 'rock') {
       // 6 个环状不规则顶点（归一化 [-1,1]，绘制时按 size 缩放）
@@ -5729,32 +5828,15 @@ function drawHazards() {
       // 短颈
       ctx.fillStyle = '#3a3226';
       ctx.fillRect(cx - 2, ceilY + 2, 4, 6);
-      // 灯筒（深色金属圆柱，从侧视角是矩形）
-      const bodyG = ctx.createLinearGradient(cx - 16, 0, cx + 16, 0);
-      bodyG.addColorStop(0, '#0f0b08');
-      bodyG.addColorStop(0.35, '#4a3d2c');
-      bodyG.addColorStop(0.55, '#6a5942');
-      bodyG.addColorStop(1, '#140f0a');
-      ctx.fillStyle = bodyG;
-      ctx.fillRect(cx - 16, ceilY + 8, 32, 18);
+      // 灯筒（预烘焙 sprite，避免每帧重建渐变）
+      ctx.drawImage(SPRITE_CACHE.laser.body, cx - 16, ceilY + 8);
       // 灯筒下缘
       ctx.fillStyle = '#1a140d';
       ctx.fillRect(cx - 18, ceilY + 25, 36, 3);
-      // 灯头（发光的玻璃透镜）
-      const lensG = ctx.createRadialGradient(cx, ceilY + 27, 1, cx, ceilY + 27, 14);
-      lensG.addColorStop(0, 'rgba(255,252,220,1)');
-      lensG.addColorStop(0.45, 'rgba(255,232,160,0.9)');
-      lensG.addColorStop(1, 'rgba(255,180,60,0)');
+      // 灯头（预烘焙 sprite，避免每帧重建径向渐变）
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
-      ctx.fillStyle = lensG;
-      ctx.beginPath();
-      ctx.ellipse(cx, ceilY + 27, 13, 5.5, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,240,0.95)';
-      ctx.beginPath();
-      ctx.ellipse(cx, ceilY + 26.5, 5, 2, 0, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.drawImage(SPRITE_CACHE.laser.lens, cx - 13, ceilY + 21.5);
       ctx.restore();
 
       // ---------- 体积光锥（灯口 → 地面，上窄下宽） ----------
@@ -5800,17 +5882,10 @@ function drawHazards() {
       }
       ctx.restore();
 
-      // ---------- 地面光池 ----------
+      // ---------- 地面光池（预烘焙 sprite） ----------
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
-      const poolG = ctx.createRadialGradient(cx, groundY, 4, cx, groundY, 68);
-      poolG.addColorStop(0, 'rgba(255,244,200,0.6)');
-      poolG.addColorStop(0.5, 'rgba(255,210,130,0.22)');
-      poolG.addColorStop(1, 'rgba(255,180,80,0)');
-      ctx.fillStyle = poolG;
-      ctx.beginPath();
-      ctx.ellipse(cx, groundY, 70, 14, 0, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.drawImage(SPRITE_CACHE.laser.pool, cx - 70, groundY - 14);
       ctx.restore();
 
       continue;
@@ -8739,6 +8814,27 @@ function drawTitle() {
   ctx.fillStyle = 'rgba(235,220,175,0.85)';
   ctx.font = '18px "Microsoft YaHei", serif';
   ctx.fillText('“三千年前的一张脸，只为看你一眼。”', W / 2, 580);
+
+  // P3.2 难度选择（三档：简单/普通/困难）
+  ctx.font = '14px "Microsoft YaHei", sans-serif';
+  ctx.fillStyle = 'rgba(180,210,190,0.7)';
+  ctx.fillText('难度：', W / 2 - 180, 615);
+  const diffKeys = ['easy', 'normal', 'hard'];
+  const diffLabels = ['简单', '普通', '困难'];
+  for (let i = 0; i < 3; i++) {
+    const dx = W / 2 - 110 + i * 90;
+    const dy = 608;
+    const isActive = currentDifficulty === diffKeys[i];
+    const btnX = dx - 30, btnY = dy - 14, btnW = 60, btnH = 28;
+    ctx.fillStyle = isActive ? 'rgba(255,210,120,0.25)' : 'rgba(60,80,70,0.3)';
+    ctx.fillRect(btnX, btnY, btnW, btnH);
+    ctx.strokeStyle = isActive ? 'rgba(255,210,120,0.8)' : 'rgba(100,120,110,0.4)';
+    ctx.lineWidth = isActive ? 2 : 1;
+    ctx.strokeRect(btnX, btnY, btnW, btnH);
+    ctx.fillStyle = isActive ? 'rgba(255,240,190,1)' : 'rgba(150,180,170,0.7)';
+    ctx.font = isActive ? '600 14px "Microsoft YaHei", sans-serif' : '13px "Microsoft YaHei", sans-serif';
+    ctx.fillText(diffLabels[i], dx, dy + 5);
+  }
 
   // 浏览器要求"用户交互"后才放行音频：只用手柄开始会全程静音，这里明确提示
   if (!audioStarted) {
