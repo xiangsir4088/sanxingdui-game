@@ -1930,9 +1930,11 @@ const TUT_HINTS_BY_LEVEL = [
     { x: 2450, text: '最后一段最密——踩准节奏，别在石头下停' }
   ],
   // ---- 第 5 关 · 展柜对视：全机制融合，新机制「观众闪光灯」，高台是避难所 ----
+  // 时机必须贴住玩法：第一个观众在 x=280、第一块高台在 x=400-600。
+  // 原来"跳高台"提示在 x=800——玩家读到时高台已经走过了。提前到 380（高台正下方）。
   [
     { x: 200,  text: '有人举起手机——屏幕一亮就要爆闪，先离他远点' },
-    { x: 800,  text: '跳上高台就出了闪光的范围——高台是避难所' },
+    { x: 380,  text: '跳上高台就出了闪光的范围——高台是避难所' },
     { x: 1600, text: '最后一段了——稳住节奏，别抢' }
   ]
 ];
@@ -5600,11 +5602,14 @@ function drawGroundSection(px, py, pw, ph, worldX) {
   }
 
   if (th === 'museum') {
-    // 抛光深色石材：越往下越黑，像展厅地面延伸到暗处
+    // 抛光深色石材：越往下越黑，像展厅地面延伸到暗处。
+    // 原来顶部才 rgba(56,62,76)、底部直接 10,11,16，整块地面读成"一条亮线+一片黑"，
+    // 玩家像是走在一根栏杆上而不是站在展厅地板上。整体抬亮一档，
+    // 让地面成为一块明确的"可走石面"，玩家站上去才有立足感。
     const g = ctx.createLinearGradient(0, py, 0, py + ph);
-    g.addColorStop(0, 'rgba(56,62,76,0.98)');
-    g.addColorStop(0.3, 'rgba(32,36,45,1)');
-    g.addColorStop(1, 'rgba(10,11,16,1)');
+    g.addColorStop(0, 'rgba(72,80,96,0.98)');
+    g.addColorStop(0.34, 'rgba(44,50,62,1)');
+    g.addColorStop(1, 'rgba(18,20,28,1)');
     ctx.fillStyle = g;
     ctx.fillRect(px, py, pw, ph);
 
@@ -5618,23 +5623,23 @@ function drawGroundSection(px, py, pw, ph, worldX) {
       ctx.stroke();
     }
     ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-    for (const yy of [py + 26, py + 68]) {
+    for (const yy of [py + 30, py + 76]) {
       ctx.beginPath();
       ctx.moveTo(px, yy);
       ctx.lineTo(px + pw, yy);
       ctx.stroke();
     }
     // 石面反光：顶部一条冷白灯带反射 + 一条更亮的贴边
-    const rg = ctx.createLinearGradient(0, py, 0, py + 30);
-    rg.addColorStop(0, 'rgba(190,214,240,0.26)');
+    const rg = ctx.createLinearGradient(0, py, 0, py + 46);
+    rg.addColorStop(0, 'rgba(190,214,240,0.34)');
     rg.addColorStop(1, 'rgba(190,214,240,0)');
     ctx.fillStyle = rg;
-    ctx.fillRect(px, py, pw, 30);
+    ctx.fillRect(px, py, pw, 46);
     /* 地表线要够亮。这一条是整关唯一告诉玩家"路在这一层"的东西：
        光柱上移之后，地面本身成了玩家通道的底色，如果连这条线都模糊，
        画面下半屏就是一整块黑，人根本不知道该踩在哪里。 */
-    ctx.fillStyle = 'rgba(230,242,255,0.52)';
-    ctx.fillRect(px, py, pw, 1.8);
+    ctx.fillStyle = 'rgba(232,244,255,0.62)';
+    ctx.fillRect(px, py, pw, 2);
     return;
   }
 }
@@ -6603,7 +6608,10 @@ function drawHazards() {
       if (ph !== 'burst') {
         const pdx = player.x - h.bx, pdy = player.y - h.by;
         const inDanger = (pdx * pdx + pdy * pdy) < Math.pow(h.r + player.r * 0.5, 2);
-        const baseA = ph === 'aim' ? 0.055 + 0.075 * pp : 0.020;
+        // 常态就要看得见：0.02 填充 / 0.085 边线在黑地面上约等于没有，
+        // 玩家只有被闪一次才会知道"原来这里有个圈"。提到 0.05 / 0.16，
+        // 让"观众脚下有一圈范围"这件事在静止时也成立。
+        const baseA = ph === 'aim' ? 0.070 + 0.085 * pp : 0.048;
         ctx.save();
         // 圈内只留极淡的一层（给个体积感）。第一版画成了实心大椭圆，
         // 三个观众就是三个巨大的水洼，比光柱还抢眼——范围是给"判断"用的，不是给"看"用的。
@@ -6616,8 +6624,8 @@ function drawHazards() {
           ctx.ellipse(cx, gyE, projR, projRy, 0, 0, Math.PI * 2);
           ctx.fill();
         }
-        // 边界线：常态极淡，预警期变亮；玩家自己在圈里时再亮一档并转暖
-        const edgeA = ph === 'aim' ? 0.18 + 0.30 * pp : 0.085;
+        // 边界线：常态可读（0.16），预警期更亮；玩家自己在圈里时再亮一档并转暖
+        const edgeA = ph === 'aim' ? 0.22 + 0.30 * pp : 0.16;
         ctx.strokeStyle = `rgba(${inDanger ? '255,224,190' : '188,224,246'},${Math.min(0.60, edgeA + (inDanger ? 0.24 : 0)).toFixed(3)})`;
         ctx.lineWidth = inDanger ? 1.7 : 1.1;
         ctx.beginPath();
@@ -6678,9 +6686,11 @@ function drawHazards() {
       ctx.lineTo(cx + 20, gy - 74);
       ctx.lineTo(cx + 23, gy - 92);
       ctx.stroke();
-      // 头顶与肩线的暖色轮廓光：暗示上方射灯
-      ctx.strokeStyle = 'rgba(255,226,160,0.20)';
-      ctx.lineWidth = 1.2;
+        // 头顶与肩线的暖色轮廓光：暗示上方射灯。
+        // 0.20 太淡——观众是纯黑剪影，在暗展厅里几乎隐形，
+        // 玩家不知道"这些黑影子会伤我"。提到 0.34 让轮廓能读出来。
+        ctx.strokeStyle = 'rgba(255,226,160,0.34)';
+        ctx.lineWidth = 1.2;
       ctx.beginPath();
       ctx.arc(cx - 1, gy - 78, 8.2, Math.PI * 1.15, Math.PI * 1.95);
       ctx.stroke();
@@ -6714,7 +6724,10 @@ function drawHazards() {
         ctx.fillRect(-3, -6, 6, 12);
         ctx.restore();
       } else {
-        ctx.fillStyle = `rgba(150,180,190,${(0.28 * (1 - pp)).toFixed(3)})`;
+        // rest 也留一点微光：观众是危险源，不该是黑背景里的隐形人。
+        // 屏幕常亮一小点，玩家一眼扫过去就知道"这人举着手机"，
+        // 而不是等它爆闪了才反应过来。
+        ctx.fillStyle = 'rgba(172,200,214,0.42)';
         ctx.fillRect(-3, -6, 6, 12);
       }
       ctx.restore();
@@ -9207,6 +9220,26 @@ function drawPlayer() {
   ctx.ellipse(px, floorY + 2, player.r * 1.05 * k, player.r * 0.26 * k, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
+
+  /* 第五关角色光环：玩家是青铜色，和展柜里的青铜面具几乎同一个色、
+     同一个大小——玩家根本找不到自己（实测玩家视角截图里，绿面具和柜里的
+     面具像双胞胎）。脚下加一个金色呼吸环，这是"这是我的角色"的通用语言：
+     展品没有环，玩家有。一眼就把自己从文物堆里摘出来。 */
+  if (level.theme === 'museum') {
+    const ringR = player.r * 1.5 + Math.sin(tGlobal * 2.4) * 1.4;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,214,120,0.50)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(px, floorY + 3, ringR, ringR * 0.30, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,222,150,0.16)';
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.ellipse(px, floorY + 3, ringR * 1.28, ringR * 0.40, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
 
   /* 第五关：暗展厅 + 深色地面，玩家是个青铜绿小头像，几乎整块融进背景
      （截图里它贴在左下角，我第一眼都没找到"我在哪"）。不能靠加亮本体解决——
