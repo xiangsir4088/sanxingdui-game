@@ -340,6 +340,10 @@ cv.addEventListener('pointerdown', e => {
     for (let i = 0; i < 5; i++) {
       if (inLevelBtn(p, i)) { levelStart(i); return; }
     }
+    // 详情板上的两个热区：难度芯片、开始按钮（开始按钮进的是当前聚焦的那一关）
+    const sdi = inSelDiff(p);
+    if (sdi >= 0) { setDifficulty(DIFF_KEYS[sdi]); sfxBack(); return; }
+    if (inSelStart(p)) { levelStart(clamp(selFocus | 0, 0, 4)); return; }
     if (inSelBack(p)) { toTitle(); return; }
   }
   // 如果点击落在按钮上，不设置 clickEdge，避免恢复游戏时误触发跳跃
@@ -360,19 +364,50 @@ addEventListener('lostpointercapture', touchUpHandler);
 
 /* ================= 存档系统（P0.1） ================= */
 // localStorage 持久化：记录每关的通关状态 + 最佳用时（秒）
-const SAVE_KEY = 'sdx_progress_v1';
+const SAVE_KEY = 'sdx_progress_v1';   // 键名不随版本变，靠内部的 v 字段做迁移
+const SAVE_VER = 2;
 const saveData = {
+  v: SAVE_VER,
   cleared: [false, false, false, false, false],
   bestTime: [0, 0, 0, 0, 0],   // 0 表示尚未通关
+  totalTime: 0                 // 累计游玩秒数（v2 新增）
 };
+// 存档迁移：早期版本没有 v 字段，只能按"已知字段尽量补齐"的方式升上来。
+// 原则是**只补不改**——老存档里已有的进度绝不能被迁移逻辑清掉，
+// 否则玩家升个版本就发现通关记录没了。读不懂的字段一律忽略，不报错。
+function migrateSave(j) {
+  if (!j || typeof j !== 'object') return false;
+  const ver = +j.v || 1;
+  let touched = false;
+  const arr5 = (src) => {
+    const out = [false, false, false, false, false];
+    if (Array.isArray(src)) for (let i = 0; i < 5; i++) out[i] = src[i];
+    return out;
+  };
+  // ---- v1 → v2：补齐 v / totalTime；数组按 5 位截断或补零 ----
+  const cleared = arr5(j.cleared).map(v => !!v);
+  const best = arr5(j.bestTime).map(v => Math.max(0, +v || 0));
+  for (let i = 0; i < 5; i++) {
+    if (saveData.cleared[i] !== cleared[i]) { saveData.cleared[i] = cleared[i]; touched = true; }
+    if (saveData.bestTime[i] !== best[i]) { saveData.bestTime[i] = best[i]; touched = true; }
+  }
+  // 通关了却没记时间的脏数据：补一个 0，界面上会显示「—」而不是 NaN
+  for (let i = 0; i < 5; i++) {
+    if (!isFinite(saveData.bestTime[i])) { saveData.bestTime[i] = 0; touched = true; }
+  }
+  const tt = +j.totalTime || 0;
+  if (isFinite(tt) && tt >= 0) saveData.totalTime = tt;
+  if (ver !== SAVE_VER) touched = true;
+  saveData.v = SAVE_VER;
+  return touched;
+}
 function loadSave() {
   try {
     const s = localStorage.getItem(SAVE_KEY);
     if (!s) return;
     const j = JSON.parse(s);
-    if (Array.isArray(j.cleared)) for (let i = 0; i < 5; i++) saveData.cleared[i] = !!j.cleared[i];
-    if (Array.isArray(j.bestTime)) for (let i = 0; i < 5; i++) saveData.bestTime[i] = +j.bestTime[i] || 0;
-  } catch (e) { /* 忽略存储失败，游戏仍可运行 */ }
+    if (migrateSave(j)) persistSave();   // 迁移过就立刻落盘，下次不再重复迁移
+  } catch (e) { /* 存档损坏时保持默认值，游戏仍可运行 */ }
 }
 function persistSave() {
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(saveData)); } catch (e) {}
@@ -387,6 +422,7 @@ function recordClear(levelIdx, timeSec) {
   saveData.cleared[levelIdx] = true;
   const prev = saveData.bestTime[levelIdx];
   if (!prev || timeSec < prev) saveData.bestTime[levelIdx] = timeSec;
+  saveData.totalTime = Math.max(0, (+saveData.totalTime || 0)) + Math.max(0, timeSec || 0);
   persistSave();
 }
 loadSave();
@@ -442,12 +478,31 @@ function drawSelBtn() {
 
 /* ================= 选关菜单 ================= */
 const LEVEL_BTNS = [];
+// 卡片从 208×208 压到 208×152：原来五张卡只占 y210~418，下面 370px 全空，
+// 信息又单薄（「最佳用时 —」永远没有值、看不出难度、没有缩略图）。
+// 现在卡片只承担"选择"，细节交给下面的详情板——一张卡能说的东西本来就少。
+const SEL_PANEL = { x: 76, y: 320, w: 1128, h: 300 };
+const SEL_START = { x: SEL_PANEL.x + SEL_PANEL.w - 216, y: SEL_PANEL.y + SEL_PANEL.h - 74, w: 184, h: 46 };
+const SEL_DIFF  = { x: W - 292, y: H - 60, w: 56, h: 28, step: 62 };
+function selDiffRect(i) { return { x: SEL_DIFF.x + i * SEL_DIFF.step, y: SEL_DIFF.y, w: SEL_DIFF.w, h: SEL_DIFF.h }; }
+function inSelDiff(p) {
+  for (let i = 0; i < 3; i++) {
+    const r = selDiffRect(i);
+    if (p.x > r.x && p.x < r.x + r.w && p.y > r.y && p.y < r.y + r.h) return i;
+  }
+  return -1;
+}
+function inSelStart(p) {
+  const r = SEL_START;
+  return p.x > r.x && p.x < r.x + r.w && p.y > r.y && p.y < r.y + r.h;
+}
+let selFocus = 0;          // 详情板当前展示哪一关；鼠标移开后保持不变（不闪空）
 {
-  const w = 208, h = 208, gap = 22, total = 5 * w + 4 * gap;
+  const w = 208, h = 152, gap = 22, total = 5 * w + 4 * gap;
   for (let i = 0; i < 5; i++) {
     LEVEL_BTNS.push({
       x: (W - total) / 2 + i * (w + gap),
-      y: 210, w, h
+      y: 150, w, h
     });
   }
 }
@@ -470,10 +525,9 @@ function drawLevelSelect() {
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, W, H);
 
-  // 柔光底
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  radialGlow(W / 2, 300, 380, 'rgba(255,210,120,0.10)');
+  radialGlow(W / 2, 230, 400, 'rgba(255,210,120,0.09)');
   ctx.restore();
 
   // 标题
@@ -482,64 +536,87 @@ function drawLevelSelect() {
   ctx.fillStyle = '#e8d4a0';
   ctx.shadowColor = 'rgba(0,0,0,0.7)';
   ctx.shadowBlur = 6;
-  ctx.fillText('选关', W / 2, 96);
+  ctx.fillText('选关', W / 2, 84);
   ctx.shadowColor = 'transparent';
   ctx.shadowBlur = 0;
   ctx.fillStyle = 'rgba(210,225,210,0.68)';
   ctx.font = '14px "Microsoft YaHei", sans-serif';
   const clearedCount = saveData.cleared.filter(Boolean).length;
-  ctx.fillText('铸造 → 受祭 → 掩埋 → 发掘 → 展出    ·    已通关 ' + clearedCount + ' / 5', W / 2, 134);
+  ctx.fillText('铸造 → 受祭 → 掩埋 → 发掘 → 展出    ·    已通关 ' + clearedCount + ' / 5', W / 2, 118);
 
-  // 5 个关卡按钮（单行排开）
+  /* ---------- 五张卡：只承担"选择" ---------- */
   for (let i = 0; i < 5; i++) {
     const b = LEVEL_BTNS[i];
     const lv = LEVELS[i];
     const cleared = saveData.cleared[i];
     const best = saveData.bestTime[i];
     const hov = inLevelBtn(mouse, i);
+    const foc = (i === selFocus);
+    if (hov) selFocus = i;
 
-    // 卡片背景
+    const eraKey = ERA_ORDER[i];
+    const eraCol = ART_ERA[eraKey] ? ART_ERA[eraKey].dot : '#c8c8a0';
+
+    // 卡底
     const g = ctx.createLinearGradient(0, b.y, 0, b.y + b.h);
-    g.addColorStop(0, cleared ? 'rgba(40,70,50,0.72)' : 'rgba(20,32,26,0.72)');
+    g.addColorStop(0, cleared ? 'rgba(38,66,48,0.72)' : 'rgba(19,30,25,0.72)');
     g.addColorStop(1, 'rgba(6,12,10,0.65)');
     ctx.fillStyle = g;
     ctx.fillRect(b.x, b.y, b.w, b.h);
-    // 边框：清通关亮金，未通关暗灰
-    ctx.strokeStyle = hov ? 'rgba(255,230,170,0.95)'
-      : (cleared ? 'rgba(255,210,120,0.7)' : 'rgba(180,200,180,0.28)');
-    ctx.lineWidth = hov ? 2 : 1.5;
+
+    // 左侧时代色条：五张卡最容易"看起来一样"，用一条 3px 色条区分时代
+    ctx.fillStyle = eraCol;
+    ctx.globalAlpha = cleared ? 0.95 : 0.55;
+    ctx.fillRect(b.x, b.y, 3, b.h);
+    ctx.globalAlpha = 1;
+
+    // 边框：聚焦 > 悬停 > 已通关 > 未通关
+    ctx.strokeStyle = foc ? 'rgba(255,236,180,0.95)'
+      : (hov ? 'rgba(255,225,160,0.75)' : (cleared ? 'rgba(255,210,120,0.55)' : 'rgba(180,200,180,0.22)'));
+    ctx.lineWidth = foc ? 2 : 1.4;
     ctx.strokeRect(b.x + 0.5, b.y + 0.5, b.w - 1, b.h - 1);
 
-    // 卡号（顶部居中大数字）
-    ctx.textAlign = 'center';
-    ctx.fillStyle = cleared ? 'rgba(255,220,140,0.9)' : 'rgba(200,215,200,0.5)';
-    ctx.font = '700 46px "Microsoft YaHei", serif';
-    ctx.fillText(String(i + 1), b.x + b.w / 2, b.y + 68);
-
-    // 关卡名（两行折行）
-    ctx.font = '600 15px "Microsoft YaHei", sans-serif';
-    ctx.fillStyle = cleared ? '#f4e4b8' : 'rgba(220,225,215,0.85)';
+    // 序号
+    ctx.textAlign = 'left';
     const parts = lv.name.split(' · ');
-    ctx.fillText(parts[0] || lv.name, b.x + b.w / 2, b.y + 108);
-    ctx.font = '13px "Microsoft YaHei", sans-serif';
-    ctx.fillStyle = cleared ? 'rgba(255,220,140,0.8)' : 'rgba(200,215,200,0.6)';
-    ctx.fillText(parts[1] || '', b.x + b.w / 2, b.y + 130);
+    ctx.fillStyle = cleared ? 'rgba(255,222,148,0.92)' : 'rgba(200,215,200,0.55)';
+    ctx.font = '700 26px "Microsoft YaHei", serif';
+    ctx.fillText(parts[0] || String(i + 1), b.x + 18, b.y + 42);
 
-    // 最佳用时
+    // 关名
+    ctx.font = '600 15px "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = cleared ? '#f4e4b8' : 'rgba(220,225,215,0.88)';
+    ctx.fillText(parts[1] || lv.name, b.x + 18, b.y + 66);
+
+    // 时代小圆点 + 时代名
+    ctx.beginPath();
+    ctx.arc(b.x + 22, b.y + 84, 3, 0, Math.PI * 2);
+    ctx.fillStyle = eraCol;
+    ctx.fill();
     ctx.font = '11px "Microsoft YaHei", sans-serif';
-    ctx.fillStyle = 'rgba(180,200,180,0.5)';
-    ctx.fillText('最佳用时', b.x + b.w / 2, b.y + 158);
-    ctx.font = '700 20px Consolas, monospace';
-    ctx.fillStyle = best > 0 ? '#ffe9a8' : 'rgba(200,200,200,0.35)';
-    ctx.fillText(fmtTime(best), b.x + b.w / 2, b.y + 184);
+    ctx.fillStyle = 'rgba(190,205,190,0.55)';
+    ctx.fillText(ERA[eraKey] ? ERA[eraKey].label : '', b.x + 32, b.y + 88);
 
-    // 通关图标（右上角金勾）
+    // 最佳用时 / 未通关
+    ctx.font = '11px "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = 'rgba(170,190,175,0.45)';
+    ctx.fillText('最佳', b.x + 18, b.y + 112);
+    ctx.font = '700 15px Consolas, monospace';
+    ctx.fillStyle = best > 0 ? '#ffe9a8' : 'rgba(190,190,190,0.32)';
+    ctx.fillText(fmtTime(best), b.x + 48, b.y + 113);
+
+    // 数字键角标
+    ctx.font = '10px "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = 'rgba(130,170,150,0.42)';
+    ctx.fillText('数字 ' + (i + 1), b.x + 18, b.y + 136);
+
+    // 通关勾
     if (cleared) {
       ctx.save();
       ctx.strokeStyle = '#ffe088';
-      ctx.lineWidth = 2.4;
+      ctx.lineWidth = 2.2;
       ctx.lineCap = 'round';
-      const cx = b.x + b.w - 22, cy = b.y + 22;
+      const cx = b.x + b.w - 20, cy = b.y + 26;
       ctx.beginPath();
       ctx.moveTo(cx - 6, cy);
       ctx.lineTo(cx - 1, cy + 5);
@@ -547,32 +624,15 @@ function drawLevelSelect() {
       ctx.stroke();
       ctx.restore();
     }
-
-    // 快捷键提示
-    ctx.fillStyle = 'rgba(140,180,160,0.5)';
-    ctx.font = '10px "Microsoft YaHei", sans-serif';
-    ctx.fillText('数字 ' + (i + 1) + ' 键进入', b.x + b.w / 2, b.y + b.h - 6);
-
-    // 鼠标悬停高亮
-    if (hov) {
-      ctx.strokeStyle = 'rgba(255,240,190,0.6)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(b.x + 4, b.y + 4, b.w - 8, b.h - 8);
-    }
   }
 
-  // 顶部提示：数字键 / Tab 切换
-  ctx.textAlign = 'left';
-  ctx.fillStyle = 'rgba(150,180,170,0.55)';
-  ctx.font = '13px "Microsoft YaHei", sans-serif';
-  ctx.fillText('键盘：1 - 5 直接选关  ·  Tab 切换  ·  空格 确认  ·  Esc / Back 返回', 40, 44);
-  ctx.fillStyle = 'rgba(150,180,170,0.35)';
-  ctx.font = '11px "Microsoft YaHei", sans-serif';
-  ctx.fillText('进度已保存于本地浏览器（localStorage）', 40, 62);
+  /* ---------- 详情板：把下半屏那 300px 用掉 ---------- */
+  drawSelDetail();
 
-  // 返回标题按钮
+  /* ---------- 底部：返回 / 进度 / 难度 ---------- */
   const bb = BTN_SEL_BACK;
   const bhov = inSelBack(mouse);
+  ctx.textAlign = 'center';
   ctx.fillStyle = bhov ? 'rgba(255,225,150,0.22)' : 'rgba(10,18,16,0.55)';
   ctx.fillRect(bb.x, bb.y, bb.w, bb.h);
   ctx.strokeStyle = bhov ? 'rgba(255,225,150,0.9)' : 'rgba(190,215,205,0.38)';
@@ -580,13 +640,166 @@ function drawLevelSelect() {
   ctx.strokeRect(bb.x + 0.5, bb.y + 0.5, bb.w - 1, bb.h - 1);
   ctx.fillStyle = bhov ? '#ffeec0' : 'rgba(215,232,224,0.8)';
   ctx.font = '15px "Microsoft YaHei", sans-serif';
-  ctx.textAlign = 'center';
   ctx.fillText('返回标题 (Esc)', bb.x + bb.w / 2, bb.y + 25);
 
+  // 中间：进度 + 累计用时（累计是 v2 存档才有的字段）
+  ctx.fillStyle = 'rgba(190,210,196,0.55)';
+  ctx.font = '13px "Microsoft YaHei", sans-serif';
+  const tot = saveData.totalTime || 0;
+  ctx.fillText('已通关 ' + clearedCount + ' / 5    ·    累计用时 ' + (tot > 0 ? fmtTime(tot) : '—'), W / 2 + 40, bb.y + 25);
+
+  // 右侧：当前难度（原来只有标题页能改，进关后无处确认）
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(170,195,180,0.5)';
+  ctx.font = '11px "Microsoft YaHei", sans-serif';
+  ctx.fillText('难度', SEL_DIFF.x, SEL_DIFF.y - 8);
+  for (let i = 0; i < 3; i++) {
+    const r = selDiffRect(i);
+    const on = DIFF_KEYS[i] === currentDifficulty;
+    const dh2 = inSelDiff(mouse) === i;
+    ctx.fillStyle = on ? 'rgba(255,220,150,0.20)' : (dh2 ? 'rgba(255,235,190,0.10)' : 'rgba(10,18,16,0.45)');
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.strokeStyle = on ? 'rgba(255,228,160,0.90)' : (dh2 ? 'rgba(230,225,190,0.55)' : 'rgba(180,200,180,0.28)');
+    ctx.lineWidth = 1.2;
+    ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+    ctx.fillStyle = on ? '#ffeec0' : 'rgba(205,220,205,0.62)';
+    ctx.font = (on ? '600 12px' : '12px') + ' "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(DIFF_LABELS[i], r.x + r.w / 2, r.y + 19);
+    ctx.textAlign = 'left';
+  }
+
+  // 顶部提示
+  ctx.fillStyle = 'rgba(150,180,170,0.50)';
+  ctx.font = '13px "Microsoft YaHei", sans-serif';
+  ctx.fillText('键盘：1 - 5 直接选关  ·  Tab 切换  ·  Enter 进入  ·  Esc 返回', 40, 40);
+  ctx.fillStyle = 'rgba(150,180,170,0.32)';
+  ctx.font = '11px "Microsoft YaHei", sans-serif';
+  ctx.fillText('进度已保存于本地浏览器（localStorage）', 40, 58);
+}
+
+/* ---- 选关页详情板：缩略图 + 关卡说明 + 机制统计 + 开始按钮 ----
+   数据全部从 LEVELS / ERA / saveData 里现取，不写第二份文案——
+   关卡改了名字或机关，这里自动跟着变，不会出现"介绍页说激光、关卡里是闪光灯"。 */
+const HAZ_NAME = { fire: '火苗', rust: '锈池', rock: '落石', flash: '闪光灯' };
+function drawSelDetail() {
+  const P = SEL_PANEL;
+  const i = clamp(selFocus | 0, 0, 4);
+  const lv = LEVELS[i];
+  const eraKey = ERA_ORDER[i];
+  const cleared = saveData.cleared[i];
+  const best = saveData.bestTime[i];
+
+  // 板底
+  const pg = ctx.createLinearGradient(0, P.y, 0, P.y + P.h);
+  pg.addColorStop(0, 'rgba(18,30,26,0.80)');
+  pg.addColorStop(1, 'rgba(6,11,10,0.86)');
+  ctx.fillStyle = pg;
+  ctx.fillRect(P.x, P.y, P.w, P.h);
+  ctx.strokeStyle = 'rgba(200,190,140,0.28)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(P.x + 0.5, P.y + 0.5, P.w - 1, P.h - 1);
+
+  /* 左：缩略图框（210×236） */
+  const tx = P.x + 24, ty = P.y + 30, tw = 210, th = P.h - 60;
+  ctx.fillStyle = 'rgba(0,0,0,0.34)';
+  ctx.fillRect(tx, ty, tw, th);
+  ctx.strokeStyle = 'rgba(190,180,140,0.20)';
+  ctx.strokeRect(tx + 0.5, ty + 0.5, tw - 1, th - 1);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(tx, ty, tw, th);
+  ctx.clip();
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  radialGlow(tx + tw / 2, ty + th / 2, tw * 0.8, 'rgba(255,214,140,0.10)');
+  ctx.restore();
+  drawArtifactEra(tx + tw / 2, ty + th / 2 - 6, th * 0.86, eraKey, 0.97);
+  ctx.restore();
   ctx.textAlign = 'center';
-  ctx.fillStyle = `rgba(255,240,190,${0.45 + 0.45 * Math.sin(tGlobal * 3)})`;
+  ctx.fillStyle = 'rgba(210,205,175,0.55)';
+  ctx.font = '11px "Microsoft YaHei", sans-serif';
+  ctx.fillText(ERA[eraKey] ? ERA[eraKey].label : '', tx + tw / 2, ty + th - 12);
+
+  /* 中：关名 + 叙事 + 机制统计 */
+  const mx = tx + tw + 34;
+  ctx.textAlign = 'left';
+  const parts = lv.name.split(' · ');
+  ctx.fillStyle = '#f4e4b8';
+  ctx.font = '700 28px "Microsoft YaHei", serif';
+  ctx.fillText(lv.name, mx, P.y + 66);
+
+  ctx.fillStyle = 'rgba(190,205,190,0.5)';
+  ctx.font = '12px "Microsoft YaHei", sans-serif';
+  // 注意：皮相名在 ERA[era].label 里（熔金 / 金光余温 / 金铜绿锈 / 出土尘灰 / 展柜残光），
+  // ART_ERA 只有滤镜与色点，没有 label——写成 ART_ERA.label 会直接渲染出 "undefined"。
+  ctx.fillText('第 ' + (i + 1) + ' 关  ·  器物此时：' + (ERA[eraKey] ? ERA[eraKey].label : ''), mx, P.y + 90);
+
+  ctx.strokeStyle = 'rgba(200,190,140,0.16)';
+  ctx.beginPath();
+  ctx.moveTo(mx, P.y + 104);
+  ctx.lineTo(mx + 470, P.y + 104);
+  ctx.stroke();
+
+  // 叙事：直接取 storyHook，和介绍页同源
+  const lines = wrapTextReturn(lv.storyHook || '', mx, P.y + 132, 470, 21,
+    'rgba(216,228,214,0.82)', '13px "Microsoft YaHei", sans-serif');
+
+  // 机制 / 拾取：从 hazards 与 motes 现算，不另写一份描述
+  const cnt = {};
+  for (const hz of (lv.hazards || [])) cnt[hz.t] = (cnt[hz.t] || 0) + 1;
+  const hzTxt = Object.keys(cnt).map(k => (HAZ_NAME[k] || k) + ' ×' + cnt[k]).join('   ·   ') || '无';
+  const py0 = P.y + 132 + lines * 21 + 16;
+  const rows = [
+    ['机关', hzTxt],
+    ['拾取', (lv.pickupName || '光尘') + ' ×' + (lv.motes ? lv.motes.length : 0) +
+             '（' + (lv.pickupUnit || '缕') + '，集齐才能进终点）'],
+    ['旁白', (lv.lines ? lv.lines.length : 0) + ' 段']
+  ];
+  for (let r = 0; r < rows.length; r++) {
+    const ry = py0 + r * 24;
+    ctx.fillStyle = 'rgba(160,185,170,0.48)';
+    ctx.font = '11px "Microsoft YaHei", sans-serif';
+    ctx.fillText(rows[r][0], mx, ry);
+    ctx.fillStyle = 'rgba(206,220,206,0.72)';
+    ctx.font = '12px "Microsoft YaHei", sans-serif';
+    ctx.fillText(rows[r][1], mx + 40, ry);
+  }
+
+  /* 右：状态 + 最佳用时 + 开始按钮 */
+  const rx = P.x + P.w - 216;
+  ctx.fillStyle = cleared ? 'rgba(255,224,150,0.95)' : 'rgba(180,200,185,0.55)';
+  ctx.font = '700 17px "Microsoft YaHei", sans-serif';
+  ctx.fillText(cleared ? '已通关' : '未通关', rx, P.y + 60);
+
+  ctx.fillStyle = 'rgba(170,190,175,0.42)';
+  ctx.font = '11px "Microsoft YaHei", sans-serif';
+  ctx.fillText('最佳用时', rx, P.y + 92);
+  ctx.fillStyle = best > 0 ? '#ffe9a8' : 'rgba(200,205,195,0.34)';
+  ctx.font = '700 34px Consolas, monospace';
+  ctx.fillText(fmtTime(best), rx, P.y + 132);
+
+  ctx.fillStyle = 'rgba(170,190,175,0.42)';
+  ctx.font = '11px "Microsoft YaHei", sans-serif';
+  ctx.fillText('本关难度', rx, P.y + 168);
+  ctx.fillStyle = 'rgba(230,235,215,0.80)';
+  ctx.font = '600 14px "Microsoft YaHei", sans-serif';
+  const dIdx = DIFF_KEYS.indexOf(currentDifficulty);
+  ctx.fillText(DIFF_LABELS[dIdx < 0 ? 1 : dIdx], rx, P.y + 190);
+
+  // 开始按钮
+  const S = SEL_START;
+  const shov = inSelStart(mouse);
+  ctx.fillStyle = shov ? 'rgba(255,222,150,0.26)' : 'rgba(255,214,130,0.14)';
+  ctx.fillRect(S.x, S.y, S.w, S.h);
+  ctx.strokeStyle = shov ? 'rgba(255,238,190,0.95)' : 'rgba(255,220,150,0.60)';
+  ctx.lineWidth = shov ? 2 : 1.4;
+  ctx.strokeRect(S.x + 0.5, S.y + 0.5, S.w - 1, S.h - 1);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = shov ? '#fff4d2' : '#ffe6b0';
   ctx.font = '600 16px "Microsoft YaHei", sans-serif';
-  ctx.fillText('按 Esc 返回标题 · 1 - 5 直接选关', W / 2, H - 34);
+  ctx.fillText('进入这一关', S.x + S.w / 2, S.y + 29);
+  ctx.textAlign = 'left';
 }
 
 const pad = { left: false, right: false, jump: false, jumpEdge: false, startEdge: false,
@@ -676,6 +889,10 @@ function gatherInput() {
 /* ================= 音效（WebAudio 合成） ================= */
 let audioCtx = null, masterGain = null, ambientOn = false, audioStarted = false;
 let audioMuted = false;
+// 静音开关要跨刷新保持：玩家静过一次，下次进来不该又响。
+// 键单独放，不并进进度存档——清进度不等于想重新开声音。
+const MUTE_KEY = 'sdx_mute_v1';
+try { audioMuted = localStorage.getItem(MUTE_KEY) === '1'; } catch (e) {}
 let ambState = 'title';          // 'title' | 'game'：两种紧张度
 let ambGraph = null;             // 常驻节点（drone / heartbeat / shimmer）
 
@@ -692,7 +909,7 @@ function resumeAudio() {
       comp.attack.value = 0.004;
       comp.release.value = 0.20;
       masterGain = audioCtx.createGain();
-      masterGain.gain.value = 1.05;
+      masterGain.gain.value = audioMuted ? 0 : 1.05;   // 上次静音过就保持静音
       masterGain.connect(comp);
       comp.connect(audioCtx.destination);
     }
@@ -706,8 +923,11 @@ function resumeAudio() {
 
 // 静音开关：主声道直接切到 0，节点保留，恢复时无缝
 function toggleMute() {
-  if (!audioCtx || !masterGain) return;
+  // 先落盘再判断音频节点：音频上下文还没建起来时（首次交互前按 M）
+  // 也应该记住"我要静音"，否则这次按键等于没按。
   audioMuted = !audioMuted;
+  try { localStorage.setItem(MUTE_KEY, audioMuted ? '1' : '0'); } catch (e) {}
+  if (!audioCtx || !masterGain) return;
   masterGain.gain.cancelScheduledValues(audioCtx.currentTime);
   masterGain.gain.linearRampToValueAtTime(audioMuted ? 0 : 1.05, audioCtx.currentTime + 0.15);
 }
@@ -848,6 +1068,16 @@ function sfxMote() {
 }
 
 // 夯土块撞地闷响：低频冲击 + 短促噪声散射
+/* 闷雷：不能做成"爆炸"。真实雷声是被空气和土挡过的低频，先闷后散，
+   所以是三层噪声叠起来——主低频（68Hz）、更低的拖尾（48Hz）、一点远处的碎响（300Hz）。 */
+function sfxThunder(v) {
+  if (!audioCtx || !masterGain || audioMuted) return;
+  const k = v === undefined ? 1 : v;
+  noise(1.30, 0.30 * k, 68, 0.55);
+  setTimeout(() => { if (!audioMuted) noise(1.70, 0.19 * k, 48, 0.45); }, 170);
+  setTimeout(() => { if (!audioMuted) noise(0.55, 0.09 * k, 300, 0.9); }, 60);
+}
+
 function sfxRockImpact() {
   if (!audioCtx || !masterGain || audioMuted) return;
   const now = audioCtx.currentTime;
@@ -1506,12 +1736,17 @@ const LEVELS = [
     lines: [
       { x: 300, text: '砖厂取土，一锄磕到硬物——1986 年 8 月 14 日，二号坑。' },
       { x: 1100, text: '刷毛扫过的地方，金光已经不留——只剩绿锈。' },
-      { x: 2000, text: '它被刷出来的时候，看见的不是商人，是三千年后的我们。' }
+      { x: 2000, text: '它被刷出来的时候，看见的不是商人，是三千年后的我们。' },
+      // 史实：这次是抢救性发掘，为抢在七月雷雨前清理，考古队三天三夜没合眼。
+      // 画面里的天色随进度压下来（drawStormOverlay），这一句替"天色"把话说明。
+      { x: 2500, text: '云压到坑口了——三天三夜没合眼，就为抢在这场雨前面。' }
     ]
   },
   {
     theme: 'museum', name: '五 · 展柜对视', width: 2400,
     spawn: { x: SPAWN_X, y: SPAWN_Y }, goal: { x: 2180, y: GOAL_Y },
+    // 第五关的收尾不是"穿过时代之门"，而是走进主展柜、和玻璃外的人对上眼
+    finale: 'vitrine',
     // 考据：三星堆博物馆藏，现借展于东莞市博物馆《吉金万里》特展。
     // 原写「今日本土，东莞展柜之内」既是病句，又把借展地当成归属地。
     storyHook: '三星堆博物馆藏，现借展于东莞市博物馆《吉金万里》特展。射灯缓缓扫过玻璃——它看着你，你还它一个目光。',
@@ -1799,6 +2034,7 @@ function loadLevel(i) {
   player.hp = MAXHP;
   cam.x = 0;
   collected = 0;
+  resetStorm();           // 进关重置雷雨计时，别让上一局的闪电串到这局
   motes.length = 0;
   level.motes.forEach((m, mi) => motes.push({ x: m.x, y: m.y, taken: false, shardIdx: mi % 18 }));
   burst = [];
@@ -2249,6 +2485,7 @@ function step(dt) {
 
   /* --- 危险物 / 旁白 / 受击表现 --- */
   updateHazards(dt);
+  updateStorm(dt);        // 第 4 关：雷雨将至（其余关卡内部直接 return）
   updateSubs(dt);
   hurtFlash = Math.max(0, hurtFlash - dt * 1.6);
   shakeT = Math.max(0, shakeT - dt);
@@ -3875,11 +4112,14 @@ function bgDig() {
   ctx.fillRect(0, 0, W, 220);
 
   // 探方口光柱（几束从地表透下来的阳光）
+  // 雷雨将至：云一压过来，直射光柱先没——所以整组光柱按进度衰减到两成，
+  // 否则画面上"天黑了"和"阳光还在打光柱"同时成立，两个都不信。
+  const sunK = 1 - 0.80 * clamp(levelProgress(), 0, 1);
   for (let i = 0; i < 4; i++) {
     const x = 200 + i * 340 - (cam.x * 0.5 % 340);
     const g = ctx.createLinearGradient(x, 90, x + 60, 500);
-    g.addColorStop(0, 'rgba(255,240,190,0.22)');
-    g.addColorStop(0.5, 'rgba(255,220,150,0.08)');
+    g.addColorStop(0, `rgba(255,240,190,${(0.22 * sunK).toFixed(3)})`);
+    g.addColorStop(0.5, `rgba(255,220,150,${(0.08 * sunK).toFixed(3)})`);
     g.addColorStop(1, 'rgba(255,200,120,0)');
     ctx.fillStyle = g;
     ctx.beginPath();
@@ -3896,6 +4136,90 @@ function bgDig() {
     const py = 175 + ((seed * 13 + tGlobal * (10 + (i % 5) * 4)) % 500);
     ctx.fillStyle = `rgba(255,245,210,${0.14 + (i % 4) * 0.06})`;
     ctx.fillRect(px, py, 2, 2);
+  }
+
+}
+
+/* ================= 第 4 关「雷雨将至」 =================
+   史实自带时间压力：1986 年那场发掘是抢救性的，考古队三天三夜没合眼，
+   就是为了抢在七月雷雨前把坑清理完（见 docs/考据复核 事实基线第 11 条）。
+   但原版画面里天色始终是大晴天，"抢时间"这层压力只写在文案里，画面完全不支持。
+
+   做法：不新画天空，而是给已有的探方加三样东西——
+     · 云影：几条横过画面的暗带，速度不同（视差），越到后面越密
+     · 压顶：从上往下压一层冷灰，阳光光柱自然被压掉
+     · 远处闪电：只看见天光一亮，不画具体电光分支
+       （画电光很容易变成廉价特效，而"远处闪电"本来就只有天光）
+   雷声永远晚于闪电 0.6~1.3s —— 光先到、声后到，这一点做对了才有"远"的感觉。 */
+const storm = { next: 5.5, flashT: 0, lastBolts: 0 };
+function resetStorm() {
+  storm.next = 4.5 + Math.random() * 2.5;
+  storm.flashT = 0;
+}
+function updateStorm(dt) {
+  if (!level || level.theme !== 'dig') return;
+  const p = levelProgress();
+  storm.next -= dt;
+  if (storm.next <= 0 && p > 0.12) {
+    // 越接近终点越频繁：开局 10~13s 一次，最后 4~6s 一次
+    storm.next = (12.5 - 7.5 * p) + Math.random() * 2.5;
+    storm.flashT = 0.42;
+    const v = 0.55 + Math.random() * 0.45;
+    setTimeout(() => { if (!audioMuted) sfxThunder(v); }, 640 + Math.random() * 680);
+  }
+  if (storm.flashT > 0) storm.flashT = Math.max(0, storm.flashT - dt);
+}
+function drawStormOverlay() {
+  const p = clamp(levelProgress(), 0, 1);
+  if (p < 0.015) return;
+
+  // ① 整屏冷 veil：太阳被云挡住时，不是"局部变暗"而是整体褪色转灰。
+  //    没有这一层，坑底永远是晴天亮度，"天要下雨"只在画面顶部成立。
+  ctx.fillStyle = `rgba(22,28,38,${(0.21 * p).toFixed(3)})`;
+  ctx.fillRect(0, 0, W, H);
+
+  // ② 压顶：上冷下暖，越往上越沉
+  const cg = ctx.createLinearGradient(0, 0, 0, 320);
+  cg.addColorStop(0, `rgba(13,18,27,${(0.56 * p).toFixed(3)})`);
+  cg.addColorStop(0.55, `rgba(16,21,28,${(0.24 * p).toFixed(3)})`);
+  cg.addColorStop(1, 'rgba(16,21,28,0)');
+  ctx.fillStyle = cg;
+  ctx.fillRect(0, 0, W, 320);
+
+  // ③ 云影：三个速度不同的软云团从坑口横过。
+  //    这里刻意不用矩形暗带——矩形在暗底上会留下一条笔直的横边，
+  //    而云是没有边的；用竖向压扁的径向渐变，边缘自然衰减。
+  for (let i = 0; i < 3; i++) {
+    const span = W + 900;
+    const sp = 11 + i * 10;
+    const bx = ((tGlobal * sp - i * 520) % span + span) % span - 450;
+    const a = (0.16 + 0.07 * i) * p;
+    ctx.save();
+    ctx.translate(bx, 34 + i * 46);
+    ctx.scale(1, 0.40);
+    const rg = ctx.createRadialGradient(0, 0, 0, 0, 0, 300);
+    rg.addColorStop(0, `rgba(8,11,17,${a.toFixed(3)})`);
+    rg.addColorStop(0.62, `rgba(8,11,17,${(a * 0.52).toFixed(3)})`);
+    rg.addColorStop(1, 'rgba(8,11,17,0)');
+    ctx.fillStyle = rg;
+    ctx.fillRect(-300, -300, 600, 600);
+    ctx.restore();
+  }
+
+  // ③ 远处闪电：天光一亮，不画电光分支
+  if (storm.flashT > 0) {
+    const k = storm.flashT / 0.42;                       // 1 → 0
+    // 真实闪电是"两三下"，用 |sin| 做脉冲，越往后越弱
+    const a = Math.pow(k, 1.35) * (0.52 + 0.48 * Math.abs(Math.sin((1 - k) * 27)));
+    const lg = ctx.createLinearGradient(0, 0, 0, 340);
+    lg.addColorStop(0, `rgba(200,218,255,${(0.46 * a).toFixed(3)})`);
+    lg.addColorStop(0.5, `rgba(172,192,236,${(0.14 * a).toFixed(3)})`);
+    lg.addColorStop(1, 'rgba(150,170,220,0)');
+    ctx.fillStyle = lg;
+    ctx.fillRect(0, 0, W, 340);
+    // 整屏一点冷闪，让"远"也照到坑底
+    ctx.fillStyle = `rgba(186,204,246,${(0.035 * a).toFixed(3)})`;
+    ctx.fillRect(0, 0, W, H);
   }
 }
 
@@ -8797,21 +9121,35 @@ function drawPlayer() {
   // 触发条件：goldFlash > 0（收集后）或 水平速度 > 70% SPEED（高速移动）
   const trailStrength = Math.max(player.goldFlash || 0, Math.max(0, speedK - 0.55) * 1.4);
   if (trailStrength > 0.02 && player._trail.length > 2) {
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    const trLen = player._trail.length;
-    for (let i = 0; i < trLen - 1; i++) {
-      const p = player._trail[i];
-      const t = i / trLen; // 0=最旧，1=最新
-      const a = trailStrength * (1 - t) * 0.28;
-      if (a < 0.01) continue;
-      ctx.globalAlpha = a;
-      ctx.fillStyle = player.goldFlash > 0 ? '#ffe8a8' : '#b8e6cc';
-      ctx.beginPath();
-      ctx.ellipse(p.x, p.y, player.r * 0.55 * (0.5 + 0.5 * t), player.r * 0.42 * (0.5 + 0.5 * t), 0, 0, Math.PI * 2);
-      ctx.fill();
+    // 性能：原来是 9 个椭圆各画各的（9 次 beginPath + 9 次 fill + 9 次改 globalAlpha）。
+    // 现在合成**一条 Path2D + 一个沿轨迹的渐变**，只需 1 次 fill。
+    // 渐变本身承担了"越旧越淡"的衰减，所以尾巴比逐个叠椭圆更连续、不会出现圆斑。
+    const tr = player._trail, trLen = tr.length;
+    const t0 = tr[0], t1 = tr[trLen - 1];
+    const dxT = t1.x - t0.x, dyT = t1.y - t0.y;
+    // 原地不动时首尾重合，渐变会退化成零长——直接跳过这一帧
+    if (dxT * dxT + dyT * dyT > 1) {
+      const rgbT = player.goldFlash > 0 ? '255,232,168' : '184,230,204';
+      const aMax = Math.min(0.34, trailStrength * 0.28);
+      const gt = ctx.createLinearGradient(t0.x, t0.y, t1.x, t1.y);
+      gt.addColorStop(0, `rgba(${rgbT},0)`);
+      gt.addColorStop(0.5, `rgba(${rgbT},${(aMax * 0.42).toFixed(3)})`);
+      gt.addColorStop(1, `rgba(${rgbT},${aMax.toFixed(3)})`);
+      const tp = new Path2D();
+      for (let i = 0; i < trLen - 1; i++) {
+        const q = tr[i];
+        const t = i / trLen; // 0=最旧，1=最新
+        const rx = player.r * 0.55 * (0.5 + 0.5 * t);
+        const ry = player.r * 0.42 * (0.5 + 0.5 * t);
+        tp.moveTo(q.x + rx, q.y);            // 先移笔，避免椭圆之间连出一条直线
+        tp.ellipse(q.x, q.y, rx, ry, 0, 0, Math.PI * 2);
+      }
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = gt;
+      ctx.fill(tp);
+      ctx.restore();
     }
-    ctx.restore();
   }
 
   ctx.save();
@@ -9206,33 +9544,44 @@ function drawSoundBtn() {
 }
 
 /* ================= 文字换行 ================= */
-function wrapText(text, x, y, maxW, lineH, color, font) {
+/* 中文折行：行首禁则 + 返回行数。
+   拆成"先算行、再画"两步——选关页详情板要先知道正文占几行，
+   才能把下面的「机关 / 拾取 / 旁白」三行排上去，否则会压在正文上。 */
+function layoutWrapped(text, maxW, font) {
   ctx.font = font;
-  ctx.fillStyle = color;
-  ctx.textAlign = 'left';
-  // 行首禁则：中文排版里「，。、；：？！」不能出现在一行的开头。
-  // 原来只判断"这一行装不下了"，第 5 关那句「…隔着一层玻璃看你」+「。」正好超宽，
+  // 行首禁则：中文排版里「，。、；：？！」不能出现在一行开头。
+  // 原来只判断"这一行装不下了"，第 5 关那句「…隔着一层玻璃看它」+「。」正好超宽，
   // 收窄正文栏之后「。」被甩到下一行行首，读起来像错字。
   // 处理：把上一行末尾那个字连同标点一起带下去（避头），栏宽保持不溢出。
   const NO_HEAD = '，。、；：？！）》」』”’…—·';
-  let line = '', yy = y;
+  const out = [];
+  let line = '';
   for (const ch of text) {
     const test = line + ch;
     if (ctx.measureText(test).width > maxW && line) {
       if (NO_HEAD.indexOf(ch) >= 0 && line.length >= 2) {
-        const moved = line.slice(-1);
-        ctx.fillText(line.slice(0, -1), x, yy);
-        line = moved + ch;
+        out.push(line.slice(0, -1));
+        line = line.slice(-1) + ch;
       } else {
-        ctx.fillText(line, x, yy);
+        out.push(line);
         line = ch;
       }
-      yy += lineH;
     } else {
       line = test;
     }
   }
-  if (line) ctx.fillText(line, x, yy);
+  if (line) out.push(line);
+  return out;
+}
+function wrapText(text, x, y, maxW, lineH, color, font) {
+  const ls = layoutWrapped(text, maxW, font);
+  ctx.fillStyle = color;
+  ctx.textAlign = 'left';
+  for (let i = 0; i < ls.length; i++) ctx.fillText(ls[i], x, y + i * lineH);
+  return ls.length;
+}
+function wrapTextReturn(text, x, y, maxW, lineH, color, font) {
+  return wrapText(text, x, y, maxW, lineH, color, font);
 }
 
 /* ================= 标题 ================= */
@@ -9424,7 +9773,24 @@ function drawTitle() {
 
 /* ================= 关卡过场 ================= */
 function drawIntro() {
-  ctx.fillStyle = 'rgba(4,9,8,0.94)';
+  /* 过场底必须是**不透明**的。
+     原来用 rgba(4,9,8,0.94)——剩下那 6% 会把冻结世界透出来：第 4 关是探方层位牌
+     与木桩、第 5 关是一排展柜和墙面装饰，在这个亮度下全变成一片灰色矩形残影，
+     比不遮还脏（和第 2 关「碎器」过场踩的是同一个坑）。
+     改成按关卡主题取色的实色底：干净，而且各关的色温差别还在。 */
+  const INTRO_BG = {
+    forge:  ['#1a0d06', '#070403'],
+    ritual: ['#180e06', '#060402'],
+    burial: ['#0b150e', '#040706'],
+    dig:    ['#171008', '#060403'],
+    museum: ['#08120f', '#030605']
+  };
+  const ib = INTRO_BG[level.theme] || INTRO_BG.museum;
+  const ibg = ctx.createLinearGradient(0, 0, 0, H);
+  ibg.addColorStop(0, ib[0]);
+  ibg.addColorStop(0.55, ib[1]);
+  ibg.addColorStop(1, '#020403');
+  ctx.fillStyle = ibg;
   ctx.fillRect(0, 0, W, H);
 
   // 左侧演出：第一关"炉火初开"、第二关"燎祭之夜"，其余走五时代演变过场
@@ -9441,6 +9807,157 @@ function drawIntro() {
   ctx.stroke();
 
   drawIntroInfo();
+}
+
+/* ---------- 陶范（合范 → 浇铸）----------
+   第 1 关原来只有「炉火 → 金面跃出」，中间最该有的一帧看不见：
+   铜汁是**浇进陶范**里才成形的，范本身一次都没出现过。
+   这一帧就画那块范：两片合上、缝里渗出一线橙红铜液、往下淌。
+
+   画法上只有三块东西：左半、右半、中间那道缝。
+   两个注意点：
+     · 外缘必须斜、必须有土色分层——画成两个方块就是贴纸，不是陶范。
+     · 缝里那线铜是全画面唯一的饱和橙红，亮度必须压过炉火，
+       否则玩家读不出"这就是刚浇进去的铜汁"。 */
+function drawMoldPair(cx, baseY, closeK, hotK, dripP) {
+  const hh = 96;                      // 范高
+  const halfW = 33;                   // 单扇宽
+  const spread = (1 - closeK) * 15;   // 两扇张开量：合上时为 0（张太开会读成两块石头）
+  const topY = baseY - hh;
+
+  /* 接地阴影：不画这一道，两块范会像"插"在地上 */
+  const shg = ctx.createRadialGradient(cx, baseY + 3, 2, cx, baseY + 3, 74);
+  shg.addColorStop(0, 'rgba(0,0,0,0.55)');
+  shg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = shg;
+  ctx.beginPath();
+  ctx.ellipse(cx, baseY + 3, 74, 11, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  for (const dir of [-1, 1]) {
+    const inX = cx + dir * spread;
+    const outX = cx + dir * (spread + halfW);
+
+    /* 轮廓：不是干净的梯形，外缘要有几处缺损——陶范是手糊的土坯，边是崩的。
+       全部用整数偏移写死（不用随机），这样每帧一致、不会闪。 */
+    const pts = [
+      [inX, topY + 6],
+      [outX - dir * 6, topY],            // 顶边朝外下斜
+      [outX - dir * 2, topY + 9],        // 顶部崩掉一角
+      [outX, topY + 22],
+      [outX - dir * 2, topY + 41],       // 中部一处内凹
+      [outX, topY + 62],
+      [outX - dir * 5, baseY],           // 底边外撇
+      [inX, baseY]
+    ];
+    const pth = new Path2D();
+    pth.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) pth.lineTo(pts[i][0], pts[i][1]);
+    pth.closePath();
+
+    /* 厚度：先在同位置压一层错开的深色同形，再画本体。
+       这一层是"纸片 → 土块"的关键，缺了它无论怎么调色都像卡纸。 */
+    ctx.save();
+    ctx.translate(dir * 3.2, 4.5);
+    ctx.fillStyle = 'rgba(4,3,2,0.92)';
+    ctx.fill(pth);
+    ctx.restore();
+
+    const mg = ctx.createLinearGradient(
+      dir < 0 ? outX : inX, 0, dir < 0 ? inX : outX, 0);
+    mg.addColorStop(0, '#3b2717');
+    mg.addColorStop(0.42, '#4a3120');
+    mg.addColorStop(1, '#241609');
+    ctx.fillStyle = mg;
+    ctx.fill(pth);
+
+    ctx.save();
+    ctx.clip(pth);
+
+    // 泥条分层：横着的细纹，间距不均（均匀了就变成"横格纸"）
+    ctx.strokeStyle = 'rgba(158,112,66,0.13)';
+    ctx.lineWidth = 1;
+    const bands = [0.22, 0.38, 0.57, 0.74, 0.88];
+    for (let i = 0; i < bands.length; i++) {
+      const yy = topY + hh * bands[i];
+      ctx.beginPath();
+      ctx.moveTo(cx - 90, yy);
+      ctx.lineTo(cx + 90, yy + (i % 2 ? 1.5 : -1));
+      ctx.stroke();
+    }
+    // 羼砂的粗颗粒：陶土里掺砂是事实，也正好当噪点用
+    for (let i = 0; i < 26; i++) {
+      const rx = cx + Math.sin(i * 12.9898 + dir) * 40;
+      const ry = topY + ((i * 37) % hh);
+      ctx.fillStyle = i % 3 ? 'rgba(24,16,10,0.42)' : 'rgba(196,150,96,0.16)';
+      ctx.beginPath();
+      ctx.arc(rx + dir * 6, ry, 0.9 + (i % 3) * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // 受火面：炉子在左边，左扇的朝外面最亮
+    const rim = ctx.createLinearGradient(
+      dir < 0 ? outX : inX, 0, dir < 0 ? inX : outX, 0);
+    rim.addColorStop(0, 'rgba(214,132,58,0.26)');
+    rim.addColorStop(0.55, 'rgba(120,72,34,0.05)');
+    rim.addColorStop(1, 'rgba(0,0,0,0.10)');
+    ctx.fillStyle = rim;
+    ctx.fill(pth);
+    // 越靠地面越暗：接触阴影往上带一点
+    const foot = ctx.createLinearGradient(0, baseY - 22, 0, baseY);
+    foot.addColorStop(0, 'rgba(0,0,0,0)');
+    foot.addColorStop(1, 'rgba(0,0,0,0.42)');
+    ctx.fillStyle = foot;
+    ctx.fillRect(cx - 90, baseY - 22, 180, 22);
+    ctx.restore();
+
+    // 张开时露出的内腔：比范身更深的一片凹槽，边缘还挂着一点暗红（刚脱过模）
+    if (spread > 1.5) {
+      ctx.fillStyle = 'rgba(5,3,2,0.92)';
+      ctx.beginPath();
+      ctx.moveTo(inX, topY + 8);
+      ctx.lineTo(inX, baseY - 3);
+      ctx.lineTo(inX - dir * 11, baseY - 5);
+      ctx.lineTo(inX - dir * 11, topY + 11);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  /* 合上之后：缝里那一线铜汁 */
+  if (closeK > 0.90 && hotK > 0.01) {
+    const seamTop = topY + 6, seamBot = baseY - 2;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const lg = ctx.createLinearGradient(0, seamTop, 0, seamBot);
+    lg.addColorStop(0, `rgba(255,236,178,${(0.92 * hotK).toFixed(3)})`);
+    lg.addColorStop(0.40, `rgba(255,150,50,${(0.98 * hotK).toFixed(3)})`);
+    lg.addColorStop(1, `rgba(208,66,16,${(0.70 * hotK).toFixed(3)})`);
+    ctx.fillStyle = lg;
+    ctx.fillRect(cx - 1.0, seamTop, 2.0, seamBot - seamTop);
+    // 缝外的热晕：让"渗出来"有体积，而不是一根亮线贴在平面上
+    radialGlow(cx, (seamTop + seamBot) / 2, 30, `rgba(255,124,36,${(0.20 * hotK).toFixed(3)})`);
+    radialGlow(cx, seamBot - 8, 15, `rgba(255,224,160,${(0.24 * hotK).toFixed(3)})`);
+    // 浇口：顶上那一点最亮，因为铜是从上面灌进去的
+    radialGlow(cx, seamTop + 1, 9, `rgba(255,246,206,${(0.34 * hotK).toFixed(3)})`);
+
+    if (dripP >= 0 && dripP <= 1) {
+      // 铜液只能淌到范底为止——原来乘的是 hh*0.58，终点掉到了地面线以下，
+      // 看起来像一滴亮珠子浮在空中（放大 4 倍一眼就能看见）。
+      const dy = seamBot - 5 + dripP * (baseY - seamBot + 3);
+      const da = hotK * (1 - Math.max(0, dripP - 0.74) / 0.26);
+      ctx.strokeStyle = `rgba(255,168,64,${(da * 0.55).toFixed(3)})`;
+      ctx.lineWidth = 1.3;
+      ctx.beginPath();
+      ctx.moveTo(cx + 0.5, seamBot - 8);
+      ctx.lineTo(cx + 0.5, dy);
+      ctx.stroke();
+      ctx.fillStyle = `rgba(255,244,204,${da.toFixed(3)})`;
+      ctx.beginPath();
+      ctx.arc(cx + 0.5, dy, 2.0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
 }
 
 /* ---------- 左侧：第一关专属「炉火初开」开场演出 ---------- */
@@ -9560,6 +10077,15 @@ function drawIntroForge() {
     ctx.fill();
   }
   ctx.restore();
+
+  /* --- 合范 → 浇铸 ----
+     时序与炉火同步：蓄势的同时范在合（0.12~0.97s），炉温到位那一瞬铜汁灌进去
+     （1.02s 起缝里见红），之后是余温。这样"范"不是背景摆设，
+     而是和"金面跃出"同一条工序上的前一环。 */
+  const closeK = clamp((ph - 0.12) / 0.85, 0, 1);
+  const hotK = clamp((ph - 1.02) / 0.34, 0, 1) * clamp(1 - (ph - 2.45) / 1.35, 0, 1);
+  const dripP = hotK > 0.22 ? (((ph - 1.36) % 0.66) / 0.66) : -1;
+  drawMoldPair(432, 549, closeK, hotK, dripP);
 
   /* --- 金面：从炉膛里跃出来 --- */
   if (leap > 0) {
@@ -9683,11 +10209,11 @@ function drawIntroForge() {
   ctx.fillText('金面', bx1, by - 12);
   ctx.textAlign = 'left';
 
-  const beat = leap <= 0
-    ? '风箱鼓起，炉膛烧到发白。'
+  const beat = ph < 1.02
+    ? '两片陶范合上，风箱把炉膛吹到发白。'
     : (leap < 1
-      ? '铜汁落进陶范——一张脸在火里慢慢成形。'
-      : '它从炉膛里跃出来的时候，还是金的。');
+      ? '铜汁从缝里渗进去——一张脸在火里慢慢成形。'
+      : '它出范的时候是金黄色的。古人管青铜叫「吉金」。');
   ctx.font = '13px "Microsoft YaHei", sans-serif';
   ctx.fillStyle = 'rgba(214,226,214,' + (0.55 + 0.30 * charge).toFixed(3) + ')';
   ctx.fillText(beat, 92, 616);
@@ -9996,46 +10522,66 @@ function drawIntroEvolve() {
     museum: { name: '展柜之上',    t0: '今日',       color: '#a0c8b0' }
   };
 
-  // 演变时间轴（顶部）
-  const tlY = 210, tlX = 90, tlW = 420;
-  ctx.strokeStyle = 'rgba(200,180,130,0.25)';
+  /* 演变时间轴（顶部）
+     老版把圆点和标签拆到了上下两头：圆点在 y=210、标签在 y=500，中间隔着整张面具，
+     说的是同一件事却对不上，读者得自己在脑子里连一条 290px 的线。
+     现在标签就挂在各自圆点的正下方，圆点-名字-年代三行一组，一眼读完。
+     面具相应缩了一圈（82 → 74）并把中心下移到 362，给标签腾出头顶那 40px。 */
+  const tlY = 188, tlX = 90, tlW = 420;
+  const curIdx = ERA_ORDER.indexOf(evolveEra);
+  // 已经走过的这一段用亮线，未走的用暗线——进度本身就是信息
   ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(200,200,200,0.18)';
   ctx.beginPath();
   ctx.moveTo(tlX, tlY);
   ctx.lineTo(tlX + tlW, tlY);
   ctx.stroke();
+  if (curIdx > 0) {
+    ctx.strokeStyle = 'rgba(226,196,132,0.72)';
+    ctx.beginPath();
+    ctx.moveTo(tlX, tlY);
+    ctx.lineTo(tlX + curIdx * (tlW / 4), tlY);
+    ctx.stroke();
+  }
+
+  // 栏目标题
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(190,200,180,0.42)';
+  ctx.font = '11px "Microsoft YaHei", sans-serif';
+  ctx.fillText('同一个人头像 · 三千年里的五个瞬间', tlX, tlY - 30);
 
   for (let i = 0; i < 5; i++) {
     const dx = tlX + i * (tlW / 4);
     const cur = evolveEra === ERA_ORDER[i];
-    const past = i < ERA_ORDER.indexOf(evolveEra);
+    const past = i < curIdx;
+    const col = evolveLabelMap[ERA_ORDER[i]].color;
     ctx.beginPath();
-    ctx.arc(dx, tlY, cur ? 6 : (past ? 4 : 3), 0, Math.PI * 2);
-    ctx.fillStyle = cur ? evolveLabelMap[ERA_ORDER[i]].color
-      : (past ? 'rgba(200,180,130,0.7)' : 'rgba(200,200,200,0.22)');
+    ctx.arc(dx, tlY, cur ? 5.5 : (past ? 4 : 3), 0, Math.PI * 2);
+    ctx.fillStyle = cur ? col : (past ? 'rgba(200,180,130,0.70)' : 'rgba(200,200,200,0.22)');
     ctx.fill();
     if (cur) {
       ctx.beginPath();
-      ctx.arc(dx, tlY, 10, 0, Math.PI * 2);
-      ctx.strokeStyle = evolveLabelMap[ERA_ORDER[i]].color;
-      ctx.lineWidth = 1.5;
+      ctx.arc(dx, tlY, 9.5 + Math.sin(tGlobal * 3.4) * 1.2, 0, Math.PI * 2);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.4;
       ctx.stroke();
     }
-  }
 
-  // 当前演变标签
-  const curLbl = evolveLabelMap[evolveEra];
+    /* 标签就挂在圆点下面 —— 第 3/4/5 关的「埋藏」原来被面具颈部的金条吃掉，
+       正是因为标签离圆点太远、落到了别的图层上。现在贴着圆点，根本压不到面具。 */
+    ctx.textAlign = 'center';
+    ctx.fillStyle = cur ? col : (past ? 'rgba(214,204,176,0.62)' : 'rgba(190,190,180,0.30)');
+    ctx.font = (cur ? '700 12px' : '11px') + ' "Microsoft YaHei", sans-serif';
+    ctx.fillText(ERA_SHORT[ERA_ORDER[i]], dx, tlY + 20);
+    ctx.fillStyle = cur ? 'rgba(232,222,186,0.90)' : 'rgba(192,192,176,0.44)';
+    ctx.font = '10px "Microsoft YaHei", sans-serif';
+    ctx.fillText(evolveLabelMap[ERA_ORDER[i]].t0, dx, tlY + 34);
+  }
   ctx.textAlign = 'left';
-  ctx.fillStyle = curLbl.color;
-  ctx.font = '700 18px "Microsoft YaHei", sans-serif';
-  ctx.fillText(curLbl.name, tlX, tlY - 18);
-  ctx.font = '12px "Microsoft YaHei", sans-serif';
-  ctx.fillStyle = 'rgba(200,200,180,0.6)';
-  ctx.fillText(curLbl.t0, tlX + 100, tlY - 18);
 
   // 面具本体（居中展示演变）
-  const hdX = 300, hdY = 360;
-  const hdR = 82;
+  const hdX = 300, hdY = 362;
+  const hdR = 74;
 
   // 各 era 底部辉光颜色（RGB 元组），便于在时代边界做线性插值
   const evolveGlowRGB = {
@@ -10105,41 +10651,9 @@ function drawIntroEvolve() {
     angle: 0, sx: 1, sy: 1, blink: 0, flat: false, era: evolveEra
   });
 
-  // 底部时间轴标签（当前 era 高亮）
-  // 这一行贴着版面下沿，中间那格（x=300）正好落在面具的颈部上：
-  // 未选中的标签是 0.35 透明度的灰字，叠在亮金色铜面上等于隐形——
-  // 第 3/4/5 关的「埋藏」直接被吃掉。加一条横贯的柔和压暗带兜底，
-  // 顺带把颈尖压回背景层，整块左栏才有前后深浅。
-  // 0.62 还不够：颈部的长銎是一根竖着的高光金条，0.62 压下去之后
-  // 「埋藏 / 三千年」仍然糊在金条上，再提到 0.86，并把上下沿各放宽 8px 让过渡更软。
-  const lblPlate = ctx.createLinearGradient(0, 462, 0, 532);
-  lblPlate.addColorStop(0,    'rgba(4,9,8,0)');
-  lblPlate.addColorStop(0.40, 'rgba(4,9,8,0.86)');
-  lblPlate.addColorStop(0.74, 'rgba(4,9,8,0.86)');
-  lblPlate.addColorStop(1,    'rgba(4,9,8,0)');
-  ctx.fillStyle = lblPlate;
-  ctx.fillRect(56, 462, 508, 70);
-
-  const tlY2 = 500;
-  ctx.textAlign = 'center';
-  ctx.font = '11px "Microsoft YaHei", sans-serif';
-  const eraTicks = [
-    { x: tlX,             era: 'forge',  yr: '约前13世纪' },
-    { x: tlX + tlW * 0.25, era: 'ritual', yr: '前1300—1046' },
-    { x: tlX + tlW * 0.5,  era: 'burial', yr: '三千年' },
-    { x: tlX + tlW * 0.75, era: 'dig',    yr: '1986' },
-    { x: tlX + tlW,        era: 'museum', yr: '今日' }
-  ];
-  for (const tk of eraTicks) {
-    const cur = tk.era === evolveEra;
-    ctx.fillStyle = cur ? evolveLabelMap[tk.era].color : 'rgba(200,200,180,0.35)';
-    ctx.font = cur ? '700 12px "Microsoft YaHei", sans-serif'
-                   : '11px "Microsoft YaHei", sans-serif';
-    ctx.fillText(ERA_SHORT[tk.era], tk.x, tlY2);
-    ctx.fillStyle = cur ? 'rgba(230,220,180,0.85)' : 'rgba(180,180,160,0.35)';
-    ctx.font = '10px "Microsoft YaHei", sans-serif';
-    ctx.fillText(tk.yr, tk.x, tlY2 + 14);
-  }
+  // 底部原来的"压暗带 + 五格标签"已随标签上移一起删除。
+  // 那条 0.86 的黑带是为了救"标签压在金色颈部上"的问题，属于补丁式修补；
+  // 标签搬到圆点下面之后，面具周围不再有任何文字，补丁自然也就不需要了。
 }
 
 /* ---------- 右侧：文物图 + 关卡信息（五关共用） ---------- */
@@ -10174,19 +10688,24 @@ function drawIntroInfo() {
   ctx.fillStyle = '#f0e2bb';
   ctx.fillText(level.name, 636, 288);
 
-  wrapText(level.line, 640, 340, 258, 32, 'rgba(215,230,220,0.82)', '17px "Microsoft YaHei", sans-serif');
+  // 正文：行数交给返回值决定下面两行的位置。
+  // 原来「目标」写死在 y=468：正文两行时（第 3/5 关）下面空出 96px，
+  // 三行时（第 4 关）又挤到只剩 30px——同一版式在五关之间疏密不一致。
+  const bodyLines = wrapText(level.line, 640, 340, 258, 32,
+    'rgba(215,230,220,0.82)', '17px "Microsoft YaHei", sans-serif');
+  const goalY = 340 + bodyLines * 32 + 40;
 
   // 目标
   ctx.fillStyle = 'rgba(255,225,150,0.85)';
   ctx.font = '15px "Microsoft YaHei", sans-serif';
-  ctx.fillText('目标：拾起 ' + level.motes.length + ' ' + pickUnit() + pickName() + '，走到终点', 640, 468);
+  ctx.fillText('目标：拾起 ' + level.motes.length + ' ' + pickUnit() + pickName() + '，走到终点', 640, goalY);
 
   // 呼吸提示：原来是 0.5+0.5*sin，谷底正好落在 0——「按空格继续」这行字每两秒整个消失一次，
   // 截图撞上谷底就以为它没画出来。三处（介绍页 / 通关页 / 结局页）统一改成 0.62+0.38，
   // 只做明暗呼吸，不做显示与隐藏。
   ctx.fillStyle = `rgba(255,240,190,${0.62 + 0.38 * Math.sin(tGlobal * 3)})`;
   ctx.font = '600 17px "Microsoft YaHei", sans-serif';
-  ctx.fillText('按 空格 / 手柄任意键 继续', 640, 522);
+  ctx.fillText('按 空格 / 手柄任意键 继续', 640, goalY + 54);
 
   // 底部文化依据
   ctx.fillStyle = 'rgba(130,160,150,0.40)';
@@ -10225,7 +10744,9 @@ const FIN = {
   shards: [], dust: [], embers: [], sparks: [],
   burnP: 0, buryP: 0, fadeA: 0,
   artA: 0, flashA: 0, hitFlash: 0, impactX: 0, impactY: 0,
-  pieces: [], pieceN: 0
+  pieces: [], pieceN: 0,
+  // 第五关「对视」专用
+  vitZoom: 0, vitLift: 0, vitLampA: 0, vitRefA: 0
 };
 
 const SMASH_GROUND = 560;          // 碎器场面的基准地面线
@@ -10246,6 +10767,29 @@ const MEND_GATHER_DUR = 2.45;      // 残片归位
 const MEND_JOIN_DUR = 1.05;        // 器物显形
 const MEND_LIGHT_DUR = 0.85;       // 白光收尾
 const MEND_PIECES = 11;
+
+/* ---- 第 5 关「对视」的场面几何 ----
+   一件展品要"隔着玻璃和人对着看"，画面里必须同时出现四层：
+   柜内背光 → 台座 → 器物 → 玻璃（含反光与人影）。
+   少任何一层，读起来就只是"一个绿头放在黑底上"。 */
+const VIT = {
+  cx: 640, hw: 154,          // 柜心、柜半宽
+  top: 128, bot: 600,        // 柜内上下沿
+  seatY: 470, pedW: 100,     // 台座顶面与宽度
+  headR: 58                  // 器物半径（决定它在柜里的体量）
+};
+const VIT_ZOOM_DUR = 1.00;   // 推近
+const VIT_LIFT_DUR = 1.30;   // 上台座
+const VIT_LAMP_DUR = 0.45;   // 射灯亮起
+const VIT_GAZE_DUR = 4.10;   // 对视
+
+function sfxVitrine() {
+  if (audioMuted) return;
+  tone(1180, 0.05, 'square', 0.10);                                    // 灯"咔"一声
+  setTimeout(() => {
+    if (!audioMuted) { tone(523, 0.95, 'sine', 0.16); tone(784, 0.95, 'sine', 0.09); }
+  }, 90);
+}
 
 /* ---- 背光版青铜尊（缓存一次）----
    原图是新铸/展陈打光的效果，直接用等于把展品搬进祭祀现场。
@@ -10407,8 +10951,13 @@ function startFinale(kind) {
   FIN.pieces.length = 0;
   FIN.pieceN = 0;
 
+  FIN.vitZoom = 0; FIN.vitLift = 0; FIN.vitLampA = 0; FIN.vitRefA = 0;
+
   if (kind === 'smash') {
     FIN.phase = 'ready';
+  } else if (kind === 'vitrine') {
+    // 第五关不走残片归位：它要的是"进柜 + 对视"
+    FIN.phase = 'zoom';
   } else {
     FIN.phase = 'gather';
     // 残片从屏幕外收回来：角度、半径、起始时间都错开，才不会像"一起缩放"
@@ -10514,6 +11063,11 @@ function doSmashHit() {
 
 function updateFinale(dt) {
   FIN.t += dt;
+
+  if (FIN.kind === 'vitrine') {
+    updateVitrine(dt);
+    return;
+  }
 
   if (FIN.kind === 'smash') {
     /* ---- ① 待机 / 一砸 ---- */
@@ -11111,7 +11665,370 @@ function drawFinaleMend() {
 
 function drawFinale() {
   if (FIN.kind === 'smash') drawFinaleSmash();
+  else if (FIN.kind === 'vitrine') drawFinaleVitrine();
   else drawFinaleMend();
+}
+
+/* ================= 第五关终章：「对视」 =================
+   这一关叫「展柜对视」，可原版走到终点只是穿过一扇通用的"时代之门"——
+   玩家从头到尾没进过展柜，更没和谁对上眼。可《一眼三千年》这五个字
+   唯一能兑现的地方就在这里：它站在玻璃那一侧，你站在这一侧。
+
+   所以收尾必须是四层同时在场：
+     柜内背光 → 台座 → 器物 → 玻璃（含反光、射灯、以及玻璃里那个"你"）。
+   少任何一层，画面就只是"一个绿头放在黑底上"。
+
+   几处刻意的选择：
+     · 玻璃上的人影只给剪影 + 一点点轮廓光，不画五官。
+       画脸必然崩（恐怖谷），而真实博物馆里观众也基本是逆光的一团黑影。
+     · 举手机而不只是站着——这是第五关的机械语言（观众闪光灯），
+       一眼就能认出"这就是刚才那批人里的一个"，也就是你自己。
+    · 人影会和器物有个轻微的高度差、并稍稍偏右：两个头并排看，
+       "隔着一层玻璃对视"才成立；完全重叠只会糊成一坨。
+    · 眼线对齐、但不给眼睛。第一版在眼高点了两个 1.2px 的眼神光当"射灯反射"，
+      放大一看就是两只白眼珠——柜里像有个怪物在盯你。改成只有左缘一道轮廓光。 */
+function updateVitrine(dt) {
+  // 允许跳过：这个镜头是给愿意看的人看的，不是强制过场
+  if (input.startEdge && stateT > 1.15) {
+    state = 'clear'; stateT = 0; sfxClear(); return;
+  }
+  if (FIN.phase === 'zoom') {
+    FIN.vitZoom = Math.min(1, FIN.t / VIT_ZOOM_DUR);
+    if (FIN.t >= VIT_ZOOM_DUR) { FIN.phase = 'lift'; FIN.t = 0; }
+  } else if (FIN.phase === 'lift') {
+    FIN.vitLift = Math.min(1, FIN.t / VIT_LIFT_DUR);
+    if (FIN.t >= VIT_LIFT_DUR) { FIN.phase = 'lamp'; FIN.t = 0; sfxVitrine(); }
+  } else if (FIN.phase === 'lamp') {
+    FIN.vitLampA = Math.min(1, FIN.t / VIT_LAMP_DUR);
+    // 灯亮那一下柜内会"过曝"一帧，随即收到正常
+    FIN.flashA = Math.max(0, 1 - FIN.t / (VIT_LAMP_DUR * 1.5)) * 0.26;
+    if (FIN.t >= VIT_LAMP_DUR) { FIN.phase = 'gaze'; FIN.t = 0; FIN.flashA = 0; }
+  } else if (FIN.phase === 'gaze') {
+    FIN.vitLampA = 1;
+    FIN.vitRefA = Math.min(1, Math.max(0, (FIN.t - 0.30) / 1.70));
+    if (FIN.t >= VIT_GAZE_DUR) { state = 'clear'; stateT = 0; sfxClear(); }
+  }
+}
+
+function drawFinaleVitrine() {
+  const easeOut = x => 1 - Math.pow(1 - x, 3);
+  const zoomK = easeOut(FIN.vitZoom);
+  const liftK = easeOut(FIN.vitLift);
+  const lampA = FIN.vitLampA;
+  const refA  = FIN.vitRefA;
+
+  const L = VIT.cx - VIT.hw, R = VIT.cx + VIT.hw;
+  const seatTop = VIT.seatY;
+  const headR = VIT.headR;
+  const seatedY = seatTop - headR * 2.30 + 6;      // 颈尖略陷进台面板，才是"搁在"上面
+
+  ctx.save();
+  // 推近：从 1.16 收到 1（镜头在接近展柜，不是画面在放大）
+  const sc = 1.16 - 0.16 * zoomK;
+  ctx.translate(VIT.cx, 372);
+  ctx.scale(sc, sc);
+  ctx.translate(-VIT.cx, -372);
+
+  /* ① 展厅底：极暗，只有地面一条反光带 */
+  const bgv = ctx.createLinearGradient(0, 0, 0, H);
+  bgv.addColorStop(0, '#04070a');
+  bgv.addColorStop(0.60, '#070b0f');
+  bgv.addColorStop(1, '#020404');
+  ctx.fillStyle = bgv;
+  ctx.fillRect(-260, -160, W + 520, H + 320);
+
+  // 远处两个虚焦展柜：让"这是个展厅"成立，而不是"一个柜子飘在黑里"
+  for (let i = 0; i < 2; i++) {
+    const bx = i === 0 ? 150 : 1110;
+    ctx.fillStyle = 'rgba(22,34,40,0.42)';
+    ctx.fillRect(bx, 300, 92, 214);
+    ctx.fillStyle = 'rgba(120,150,160,0.05)';
+    ctx.fillRect(bx + 8, 318, 76, 178);
+    // 柜座：少了这一块，远处那两个柜子就是两块灰板浮在黑里
+    ctx.fillStyle = 'rgba(18,25,30,0.62)';
+    ctx.fillRect(bx - 8, 514, 108, 10);
+    const rg2 = ctx.createLinearGradient(0, 524, 0, 574);
+    rg2.addColorStop(0, 'rgba(92,122,134,0.10)');
+    rg2.addColorStop(1, 'rgba(20,26,30,0)');
+    ctx.fillStyle = rg2;
+    ctx.fillRect(bx - 16, 524, 124, 50);
+  }
+
+  // 地板：展厅有地面。全黑背景里所有东西都会失重，一条地平线就够了
+  const flg0 = ctx.createLinearGradient(0, 612, 0, H + 120);
+  flg0.addColorStop(0, 'rgba(30,39,46,0.50)');
+  flg0.addColorStop(0.55, 'rgba(14,19,24,0.24)');
+  flg0.addColorStop(1, 'rgba(6,9,12,0)');
+  ctx.fillStyle = flg0;
+  ctx.fillRect(-260, 612, W + 520, H + 360);
+  ctx.fillStyle = 'rgba(150,180,196,0.07)';
+  ctx.fillRect(-260, 611, W + 520, 1);
+
+  /* ② 柜内：背光 + 台座 */
+  const ig = ctx.createLinearGradient(0, VIT.top, 0, VIT.bot);
+  ig.addColorStop(0, `rgba(${18 + 26 * lampA | 0},${28 + 34 * lampA | 0},${34 + 32 * lampA | 0},0.96)`);
+  ig.addColorStop(0.55, 'rgba(8,13,16,0.97)');
+  ig.addColorStop(1, 'rgba(4,7,9,0.98)');
+  ctx.fillStyle = ig;
+  ctx.fillRect(L, VIT.top, VIT.hw * 2, VIT.bot - VIT.top);
+
+  // 柜内后壁的一道横向收边（展柜都有背板接缝）
+  ctx.fillStyle = 'rgba(150,180,190,0.05)';
+  ctx.fillRect(L, VIT.top + 78, VIT.hw * 2, 1);
+
+  // 台座
+  const pb = ctx.createLinearGradient(0, seatTop, 0, VIT.bot);
+  pb.addColorStop(0, '#3c444c');
+  pb.addColorStop(0.22, '#262d34');
+  pb.addColorStop(1, '#10151a');
+  ctx.fillStyle = pb;
+  ctx.fillRect(VIT.cx - VIT.pedW / 2, seatTop, VIT.pedW, VIT.bot - seatTop);
+  // 台面高光不在这里画——要等器物落位后压在它底端"之上"，见 ③ 末尾
+
+  // 射灯灯管 + 光锥
+  ctx.fillStyle = 'rgba(190,205,215,0.22)';
+  ctx.fillRect(VIT.cx - 46, VIT.top + 8, 92, 5);
+  if (lampA > 0.01) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const coneG = ctx.createLinearGradient(0, VIT.top + 12, 0, seatTop);
+    coneG.addColorStop(0, `rgba(236,246,255,${(0.20 * lampA).toFixed(3)})`);
+    coneG.addColorStop(0.68, `rgba(214,232,244,${(0.09 * lampA).toFixed(3)})`);
+    // 束光必须"落下来就散掉"：硬切在台面高度上，会在台座两侧留下两个悬空的尖角
+    coneG.addColorStop(1, 'rgba(206,226,240,0)');
+    ctx.fillStyle = coneG;
+    ctx.beginPath();
+    ctx.moveTo(VIT.cx - 44, VIT.top + 12);
+    ctx.lineTo(VIT.cx + 44, VIT.top + 12);
+    ctx.lineTo(VIT.cx + 96, seatTop);
+    ctx.lineTo(VIT.cx - 96, seatTop);
+    ctx.closePath();
+    ctx.fill();
+    radialGlow(VIT.cx, seatedY + 6, 128, `rgba(214,234,246,${(0.10 * lampA).toFixed(3)})`);
+    ctx.restore();
+  }
+
+  /* ③ 器物上台座：从台面下方升起来，命中"被摆上去"这个动作 */
+  const seatLine = seatTop - 4;                    // 台面板的上表面
+  const riseOff = (1 - liftK) * 232;               // 起始必须整个沉在台座里，冠顶都不露
+  const headY = seatedY + riseOff;
+  ctx.save();
+  // 关键：剪到台面以上。不剪的话，上升中途颈矛尖会从台座正面划过去，
+  // 看起来像把一张画贴在台座上；剪掉之后它才是"从台座里升出来"。
+  ctx.beginPath();
+  ctx.rect(L - 4, VIT.top - 60, VIT.hw * 2 + 8, seatLine - VIT.top + 60);
+  ctx.clip();
+  ctx.globalAlpha = 0.25 + 0.75 * liftK;
+  drawHead(VIT.cx, headY, headR, {
+    angle: 0, sx: 1, sy: 1, blink: 0, flat: false, era: 'museum', progressK: 1
+  });
+  ctx.restore();
+
+  /* 台面板：压在器物底端之上。这一块是"摆放"与"悬浮"的分界线——
+     少了它，无论把底座画得多准，看的人都只会觉得那东西飘在那儿。 */
+  ctx.fillStyle = '#333b43';
+  ctx.fillRect(VIT.cx - VIT.pedW / 2, seatLine, VIT.pedW, 6);
+  ctx.fillStyle = `rgba(226,240,250,${(0.10 + 0.26 * lampA).toFixed(3)})`;
+  ctx.fillRect(VIT.cx - VIT.pedW / 2, seatLine, VIT.pedW, 1.4);
+
+  // 台座口：器物是从这个口里出来的，口子里必须是暗的。
+  // 顺带把"上升时被裁断"的那条平直硬边埋进阴影里。
+  const sock = ctx.createLinearGradient(0, seatLine - 12, 0, seatLine);
+  sock.addColorStop(0, 'rgba(0,0,0,0)');
+  sock.addColorStop(1, `rgba(0,0,0,${(0.42 + 0.20 * liftK).toFixed(3)})`);
+  ctx.fillStyle = sock;
+  ctx.fillRect(VIT.cx - VIT.pedW / 2, seatLine - 12, VIT.pedW, 12);
+
+  // 台面上的落影
+  ctx.save();
+  ctx.globalAlpha = 0.5 * liftK;
+  const shg = ctx.createRadialGradient(VIT.cx, seatTop + 2, 2, VIT.cx, seatTop + 2, 46);
+  shg.addColorStop(0, 'rgba(0,0,0,0.62)');
+  shg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = shg;
+  ctx.beginPath();
+  ctx.ellipse(VIT.cx, seatTop + 2, 46, 8, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  /* ④ 玻璃：整片极淡的白 + 两道斜高光 + 顶沿一条镜面线 */
+  ctx.fillStyle = 'rgba(198,222,236,0.045)';
+  ctx.fillRect(L, VIT.top, VIT.hw * 2, VIT.bot - VIT.top);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(L, VIT.top, VIT.hw * 2, VIT.bot - VIT.top);
+  ctx.clip();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < 2; i++) {
+    const gg = ctx.createLinearGradient(L + i * 60, VIT.bot, L + 220 + i * 60, VIT.top);
+    gg.addColorStop(0, 'rgba(210,236,250,0)');
+    gg.addColorStop(0.5, `rgba(210,236,250,${0.055 - i * 0.02})`);
+    gg.addColorStop(1, 'rgba(210,236,250,0)');
+    ctx.fillStyle = gg;
+    ctx.beginPath();
+    ctx.moveTo(L + 40 + i * 74, VIT.bot);
+    ctx.lineTo(L + 96 + i * 74, VIT.bot);
+    ctx.lineTo(L + 214 + i * 74, VIT.top);
+    ctx.lineTo(L + 158 + i * 74, VIT.top);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+  ctx.fillStyle = 'rgba(214,238,250,0.10)';
+  ctx.fillRect(L, VIT.top, VIT.hw * 2, 1.5);
+
+  /* ⑤ 玻璃里那个人：剪影 + 轮廓光 + 举起来的手机
+     两条硬约束（都是踩过坑才写下的）：
+       ① 绝不画五官。画脸必掉进恐怖谷，而真实展厅里观众本来也只是逆光的一团黑影。
+       ② 绝不给"对称的两个高光点"。第一版在人眼高度点了一对 1.25px 的眼神光，
+          本意是"射灯在玻璃上的反射"，实际效果是——柜里有个怪物睁着两只白眼睛
+          在看你。一秒把《一眼三千年》变成恐怖片。 */
+  if (refA > 0.012) {
+    const rx = 726, ry = 323;                     // ry 让"他"的眼线与器物的眼线齐平
+    const br = Math.sin(tGlobal * 1.25) * 1.2;    // 呼吸：一点点就够，多了像在抖
+    ctx.save();
+    // 玻璃上的像是近处失焦的倒影，边缘必须是糊的。做一次模糊比降十个 alpha 值都管用——
+    // 锐利的剪影一眼是"柜子里站了个人"，糊掉的剪影才是"玻璃里有个人"。
+    ctx.filter = 'blur(1.2px)';
+    ctx.globalAlpha = refA * 0.86;
+
+    // 身体：颈根→肩峰→垂下。下缘用竖向渐变化进柜底，别做成一块齐边的黑板
+    const bgr = ctx.createLinearGradient(0, ry + 26, 0, VIT.bot);
+    bgr.addColorStop(0, 'rgba(10,14,19,0.94)');
+    bgr.addColorStop(0.45, 'rgba(7,11,15,0.80)');
+    bgr.addColorStop(1, 'rgba(6,9,12,0.30)');
+    ctx.fillStyle = bgr;
+    ctx.beginPath();
+    ctx.moveTo(rx - 14, ry + 26 + br);
+    ctx.quadraticCurveTo(rx - 29, ry + 35, rx - 35, ry + 48);      // 颈根 → 肩峰内缘
+    ctx.quadraticCurveTo(rx - 51, ry + 60, rx - 53, VIT.bot);      // 肩峰 → 侧身垂下
+    ctx.lineTo(rx + 53, VIT.bot);
+    ctx.quadraticCurveTo(rx + 51, ry + 60, rx + 35, ry + 48);
+    ctx.quadraticCurveTo(rx + 29, ry + 35, rx + 14, ry + 26 + br);
+    ctx.closePath();
+    ctx.fill();
+
+    // 脖子：露出一截，否则头像是直接搁在肩上的球
+    ctx.fillStyle = 'rgba(9,13,17,0.95)';
+    ctx.fillRect(rx - 10, ry + 10 + br, 20, 18);
+
+    // 头：顶圆、太阳穴最宽、下颌收窄。宽 39 / 高 48 ≈ 一个真人的头
+    ctx.beginPath();
+    ctx.moveTo(rx - 12, ry - 28 + br);
+    ctx.quadraticCurveTo(rx - 19.5, ry - 29 + br, rx - 19.5, ry - 10 + br);
+    ctx.quadraticCurveTo(rx - 19, ry + 5 + br, rx - 7, ry + 15 + br);
+    ctx.quadraticCurveTo(rx, ry + 19 + br, rx + 7, ry + 15 + br);
+    ctx.quadraticCurveTo(rx + 19, ry + 5 + br, rx + 19.5, ry - 10 + br);
+    ctx.quadraticCurveTo(rx + 19.5, ry - 29 + br, rx + 12, ry - 28 + br);
+    ctx.closePath();
+    ctx.fill();
+
+    // 轮廓光：人站在暗处看亮处，身上只有一道边有光
+    ctx.strokeStyle = 'rgba(196,218,236,0.15)';
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.moveTo(rx - 14, ry - 27 + br);
+    ctx.quadraticCurveTo(rx - 19.4, ry - 28 + br, rx - 19.4, ry - 10 + br);
+    ctx.quadraticCurveTo(rx - 19, ry + 4 + br, rx - 8, ry + 14 + br);
+    ctx.stroke();
+    // 肩线：一道很淡的顶光，把"肩"从"脖子"下面分出来
+    ctx.beginPath();
+    ctx.moveTo(rx - 22, ry + 37 + br);
+    ctx.quadraticCurveTo(rx - 42, ry + 46, rx - 49, ry + 68);
+    ctx.stroke();
+
+    // 手臂：比躯干略亮一点（正面被展柜照亮），否则一条黑臂贴在黑身上等于没画
+    ctx.strokeStyle = 'rgba(38,51,61,0.52)';
+    ctx.lineWidth = 13;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(rx + 35, ry + 52 + br);
+    ctx.quadraticCurveTo(rx + 41, ry + 72, rx + 31, ry + 92);
+    ctx.stroke();
+
+    // 手机：举起来对着展柜。注意——倒影里看到的是手机的**背面**，屏幕朝向展柜，
+    // 所以这儿不该有一块发光的白方块（第一版画了亮屏，结果那块白比青铜器还抢眼，
+    // 像有人往玻璃上贴了张贴纸）。只留一道被柜内灯光勾出来的窄边，
+    // 说明"那是块金属板"，而不是一盏灯。
+    // 位置刻意放在人影**外侧**：压在器物上就成了"青铜器上贴了张黑卡"。
+    ctx.save();
+    ctx.translate(rx + 31, ry + 81);
+    ctx.rotate(0.16);
+    ctx.fillStyle = 'rgba(26,34,42,0.96)';
+    ctx.fillRect(-10, -16, 20, 32);
+    ctx.strokeStyle = 'rgba(176,204,224,0.34)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(-9.7, -14); ctx.lineTo(-9.7, 14);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(126,156,176,0.20)';
+    ctx.fillRect(-6.5, -12.5, 13, 3.2);   // 摄像模组
+    ctx.restore();
+
+    // 手：压在手机下缘之上，才叫"捏着"，否则手机是贴在玻璃上的卡片
+    ctx.fillStyle = 'rgba(40,52,62,0.88)';
+    ctx.beginPath();
+    ctx.ellipse(rx + 27, ry + 97, 11.5, 6.2, -0.26, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  /* ⑥ 金属边框 + 地面 */
+  ctx.strokeStyle = '#4d545c';
+  ctx.lineWidth = 6;
+  ctx.strokeRect(L, VIT.top, VIT.hw * 2, VIT.bot - VIT.top);
+  ctx.strokeStyle = 'rgba(196,212,222,0.26)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(L + 4, VIT.top + 4, VIT.hw * 2 - 8, VIT.bot - VIT.top - 8);
+
+  // 地面：柜底基座 + 一道落在地砖上的反光
+  ctx.fillStyle = '#141a1f';
+  ctx.fillRect(L - 10, VIT.bot, VIT.hw * 2 + 20, 12);
+  const flg = ctx.createLinearGradient(0, VIT.bot + 12, 0, VIT.bot + 92);
+  flg.addColorStop(0, `rgba(${70 + 40 * lampA | 0},${92 + 44 * lampA | 0},${104 + 40 * lampA | 0},0.20)`);
+  flg.addColorStop(1, 'rgba(20,26,30,0)');
+  ctx.fillStyle = flg;
+  ctx.beginPath();
+  ctx.moveTo(L + 16, VIT.bot + 12);
+  ctx.lineTo(R - 16, VIT.bot + 12);
+  ctx.lineTo(R + 34, VIT.bot + 92);
+  ctx.lineTo(L - 34, VIT.bot + 92);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore();
+
+  /* ⑦ 灯亮那一下的过曝 */
+  if (FIN.flashA > 0.004) {
+    ctx.fillStyle = `rgba(255,252,246,${FIN.flashA.toFixed(3)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  /* ⑧ 文案：一句话一步，不堆在屏幕上 */
+  let cap = '', capA = 0;
+  if (FIN.phase === 'lift') { cap = '它被放上展台。'; capA = Math.min(1, FIN.t / 0.4); }
+  else if (FIN.phase === 'lamp') { cap = '射灯亮起来的那一下，玻璃里先亮的是它自己。'; capA = 1; }
+  else if (FIN.phase === 'gaze') {
+    if (FIN.t < 1.95) { cap = '然后玻璃里，慢慢浮出另一个人。'; capA = Math.min(1, FIN.t / 0.5); }
+    else { cap = '三千年，就为了这一眼。'; capA = Math.min(1, (FIN.t - 1.95) / 0.5); }
+  }
+  if (cap) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = `rgba(224,232,226,${(0.86 * capA).toFixed(3)})`;
+    ctx.font = '19px "Microsoft YaHei", serif';
+    ctx.fillText(cap, W / 2, 652);
+    ctx.textAlign = 'left';
+  }
+
+  // 跳过提示（只在前 1.15s 之后出现，避免和"进入终点"的那一下空格撞车）
+  if (stateT > 1.15 && FIN.phase !== 'gaze') {
+    ctx.textAlign = 'right';
+    ctx.fillStyle = `rgba(190,210,200,${(0.30 + 0.14 * Math.sin(tGlobal * 3)).toFixed(3)})`;
+    ctx.font = '12px "Microsoft YaHei", sans-serif';
+    ctx.fillText('按 空格 跳过', W - 40, H - 34);
+    ctx.textAlign = 'left';
+  }
 }
 
 /* ================= 通关 ================= */
@@ -11375,6 +12292,13 @@ function render() {
   drawPlayer();
   ctx.restore();
 
+  /* 第 4 关的雷雨层必须画在**世界之上**，而不是画在 bgDig 里。
+     bgDig 之后还有 drawGroundSection()（土层剖面）——那是一大片不透明的土色，
+     把整个探方的可见面积重新盖了一遍，放在 bgDig 里的雷雨层等于没画
+     （实测：进度 0.81 时整屏亮度和 0.30 时一模一样）。
+     它本质上是"天光变了"，本来也该照着平台、机关和主角一起变。 */
+  if (level.theme === 'dig') drawStormOverlay();
+
   // 爆闪的整屏泛白。单个机关的光球只照亮它自己的半径，但真实的闪光会把
   // 整个展厅刷白一下——这一下必须画在屏幕空间，画在世界坐标里会被相机裁掉。
   let veilA = 0;
@@ -11402,7 +12326,8 @@ function render() {
   // 介绍页自己的标题上（左上角「关卡名＋三千年演化徽章＋键盘手柄提示＋光尘计数」
   // 与「燎祭之夜」糊成一片）。这几种状态属于过场，本来就不该带游戏内 HUD。
   const isOverlayState = (state === 'intro' || state === 'clear' ||
-                          state === 'entering' || state === 'smash' || state === 'mend');
+                          state === 'entering' || state === 'smash' ||
+                          state === 'mend' || state === 'vitrine');
   if (!isOverlayState) {
     drawHUD();
     drawSubtitle();
@@ -11413,7 +12338,7 @@ function render() {
   if (state === 'intro') drawIntro();
   if (state === 'clear') drawClear();
   if (state === 'entering') drawEnterCrossing();
-  if (state === 'smash' || state === 'mend') drawFinale();
+  if (state === 'smash' || state === 'mend' || state === 'vitrine') drawFinale();
 
   // 暂停覆盖层：遮罩在最上层，暂停按钮在遮罩之上（点击仍能命中）
   drawPause();
@@ -11467,6 +12392,8 @@ function frame(now) {
     for (let i = 0; i < 5; i++) {
       if (pressed.has('Digit' + (i + 1))) { levelStart(i); break; }
     }
+    // Enter / 空格 / 手柄 start：进入详情板当前聚焦的那一关
+    if (input.startEdge) levelStart(clamp(selFocus | 0, 0, 4));
     if (pressed.has('Tab')) {
       // 循环切换焦点：以鼠标最接近的卡片为起点，向右移动
       let idx = 0, minD = Infinity;
@@ -11476,6 +12403,7 @@ function frame(now) {
         if (d < minD) { minD = d; idx = i; }
       }
       idx = (idx + 1) % 5;
+      selFocus = idx;                 // Tab 同时把详情板带过去，两者不能各走各的
       const nb = LEVEL_BTNS[idx];
       mouse.x = nb.x + nb.w / 2; mouse.y = nb.y + nb.h / 2;
     }
@@ -11509,7 +12437,7 @@ function frame(now) {
     if (stateT >= ENTERING_DUR) {
       state = 'clear'; stateT = 0; sfxClear();
     }
-  } else if (state === 'smash' || state === 'mend') {
+  } else if (state === 'smash' || state === 'mend' || state === 'vitrine') {
     // 终章演出：碎器要等玩家按空格（一器一砸）；拼合全自动。
     // 两个状态都在 updateFinale 内部把自己切到 'clear'，这里不需要额外收尾。
     updateFinale(dt);
