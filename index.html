@@ -8811,12 +8811,28 @@ function drawTitle() {
   ctx.fillStyle = '#e8d4a0';
   ctx.font = '700 62px "Microsoft YaHei", serif';
   ctx.fillText('一眼三千年', W / 2, 96);
-  ctx.fillStyle = 'rgba(200,225,210,0.78)';
+
+  /* ---- 标题下的三层文案：身份 → 历程 → 抵达 ----
+     改前是三行都在说同一件事：副标题用箭头列"铸造→受祭→掩埋→发掘→展出"，
+     副题又说"三千年前它是金面具，三千年后我们才看见它"——箭头是流程图口吻，
+     后一句只交代"看见了"，宾语是"我们"，跟玩家没关系，所以读起来虚。
+     现在每行只回答一个问题，且逐层收窄到"你"：
+       ① 它是什么      → 三星堆祭司青铜头像
+       ② 它经历了什么  → 铸于炉火·祭于星空·埋于黄土·掘于探方·展于灯下
+                          （五个"于"对仗，且每句正对一关的实际场景，不是空排比）
+       ③ 为什么是此刻  → 走了三千年，才走到你面前（宾语从"我们"换成"你"）
+     题眼留给"看一眼"的双关，不在这里抢。 */
+  ctx.fillStyle = 'rgba(200,225,210,0.80)';
   ctx.font = '17px "Microsoft YaHei", sans-serif';
-  ctx.fillText('三星堆祭司青铜头像 · 铸造 → 受祭 → 掩埋 → 发掘 → 展出', W / 2, 134);
-  ctx.fillStyle = 'rgba(255,210,130,0.72)';
-  ctx.font = '14px "Microsoft YaHei", sans-serif';
-  ctx.fillText('三千年前，它是一张金面具；三千年后，我们才第一次看见它', W / 2, 158);
+  ctx.fillText('三星堆祭司青铜头像', W / 2, 132);
+
+  ctx.fillStyle = 'rgba(212,226,208,0.60)';
+  ctx.font = '15px "Microsoft YaHei", sans-serif';
+  ctx.fillText('铸于炉火 · 祭于星空 · 埋于黄土 · 掘于探方 · 展于灯下', W / 2, 155);
+
+  ctx.fillStyle = 'rgba(255,210,130,0.74)';
+  ctx.font = '14px "Microsoft YaHei", serif';
+  ctx.fillText('走了三千年，才走到你面前', W / 2, 177);
 
   // 文物本体
   ctx.save();
@@ -9760,11 +9776,14 @@ function drawEnding() {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#efdba6';
   ctx.font = '700 44px "Microsoft YaHei", serif';
-  ctx.fillText('三千年前，它是一张金面具', W / 2, 490);
+  // 原句「三千年前，它是一张金面具」只是陈述，和下面那句不构成因果。
+  // 改成让"三千年"当主语、"金脸→绿锈"当变化，时间才有动作，下一句的"残金点"也才有出处。
+  ctx.fillText('三千年，把一张金脸，熬成一身绿锈', W / 2, 490);
 
   ctx.fillStyle = 'rgba(225,205,160,0.90)';
   ctx.font = '19px "Microsoft YaHei", serif';
-  ctx.fillText('三千年后，铜身绿锈里，藏着那一瞬的金光。', W / 2, 524);
+  // 与上句成因果：熬成绿锈之后，只剩锈缝里的残金——正是下面五张皮相里"绿锈剥金"那一层
+  ctx.fillText('只剩锈缝里那一点金光，还记得它出炉时的样子。', W / 2, 524);
 
   // 5 皮肤剪影：面具在三个千年里穿过的 5 种"皮"
   // 熔铸=金水滴, 祭祀=铜身金光, 掩埋=绿锈剥金, 出土=黄土蒙尘, 展柜=残光完整
