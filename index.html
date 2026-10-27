@@ -105,8 +105,8 @@ const ART_ERA_CACHE = {};
 // 只框住器物本体的紧裁框，避免把海报深色底板一起画成一块暗方块
 const ERACROP = { sx: 318, sy: 682, sw: 452, sh: 848 };
 const ART_ERA = {
-  forge:  { f: 'sepia(1) saturate(5.0) hue-rotate(-18deg) brightness(1.52) contrast(1.10)', tint: 'rgba(255,188,48,0.46)', tint2: 'rgba(255,250,214,0.20)', dot: '#ffd060' },
-  ritual: { f: 'sepia(0.90) saturate(2.5) hue-rotate(-10deg) brightness(1.30) contrast(1.05)', tint: 'rgba(232,158,52,0.30)', tint2: 'rgba(255,226,152,0.10)', dot: '#e0a050' },
+  forge:  { f: 'sepia(0.85) saturate(2.1) hue-rotate(-14deg) brightness(1.14) contrast(1.05)', tint: 'rgba(210,150,58,0.28)', tint2: 'rgba(236,206,140,0.10)', dot: '#d0a048' },
+  ritual: { f: 'sepia(0.78) saturate(1.7) hue-rotate(-8deg) brightness(1.14) contrast(1.03)', tint: 'rgba(198,140,52,0.22)', tint2: 'rgba(230,198,132,0.07)', dot: '#bc8a3c' },
   burial: { f: 'saturate(1.60) brightness(1.18) contrast(1.10)', tint: 'rgba(20,112,68,0.50)', tint2: 'rgba(132,208,158,0.16)', dot: '#7fa86a' },
   dig:    { f: 'sepia(0.62) saturate(0.72) brightness(1.22) contrast(1.02)', tint: 'rgba(148,120,74,0.40)', tint2: 'rgba(212,192,150,0.14)', dot: '#a89878' },
   museum: { f: 'saturate(1.22) brightness(1.26) contrast(1.06)', tint: 'rgba(40,146,112,0.30)', tint2: 'rgba(158,228,198,0.14)', dot: '#98c8b0' }
@@ -140,30 +140,30 @@ function getArtifactEraCanvas(eraName) {
   const rnd = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
 
   if (eraName === 'forge') {
-    // 熔金：自下而上的金属流痕 + 液滴亮核
+    // 熔金：自下而上的金属流痕 + 液滴亮核（真实金箔暗金质感，不再"发光艳金"）
     const lg = g.createLinearGradient(0, AH, 0, 0);
-    lg.addColorStop(0, 'rgba(255,238,176,0.50)');
-    lg.addColorStop(0.45, 'rgba(255,196,64,0.12)');
-    lg.addColorStop(1, 'rgba(255,255,232,0.28)');
+    lg.addColorStop(0, 'rgba(236,206,140,0.26)');
+    lg.addColorStop(0.45, 'rgba(210,160,72,0.10)');
+    lg.addColorStop(1, 'rgba(240,226,180,0.12)');
     g.fillStyle = lg;
     g.fillRect(0, 0, AW, AH);
-    for (let i = 0; i < 30; i++) {
-      const x = rnd() * AW, y = rnd() * AH, r = 1.2 + rnd() * 3.4;
-      const rg = g.createRadialGradient(x, y, 0, x, y, r * 3);
-      rg.addColorStop(0, 'rgba(255,253,228,0.92)');
-      rg.addColorStop(1, 'rgba(255,188,58,0)');
-      g.fillStyle = rg;
-      g.beginPath(); g.arc(x, y, r * 3, 0, Math.PI * 2); g.fill();
-    }
-  } else if (eraName === 'ritual') {
-    // 铜身·金光：铜色打底，脸侧仍有成片金光在跳
-    for (let i = 0; i < 20; i++) {
-      const x = rnd() * AW, y = rnd() * AH, r = 2 + rnd() * 7;
+    for (let i = 0; i < 10; i++) {
+      const x = rnd() * AW, y = rnd() * AH, r = 1.2 + rnd() * 3.0;
       const rg = g.createRadialGradient(x, y, 0, x, y, r * 2.4);
-      rg.addColorStop(0, 'rgba(255,230,158,0.64)');
-      rg.addColorStop(1, 'rgba(214,146,48,0)');
+      rg.addColorStop(0, 'rgba(255,250,214,0.42)');
+      rg.addColorStop(1, 'rgba(214,160,64,0)');
       g.fillStyle = rg;
       g.beginPath(); g.arc(x, y, r * 2.4, 0, Math.PI * 2); g.fill();
+    }
+  } else if (eraName === 'ritual') {
+    // 铜身·金光：铜色打底，脸侧仍有成片金光在跳（降为金箔反光，不发光）
+    for (let i = 0; i < 10; i++) {
+      const x = rnd() * AW, y = rnd() * AH, r = 2 + rnd() * 6;
+      const rg = g.createRadialGradient(x, y, 0, x, y, r * 2.2);
+      rg.addColorStop(0, 'rgba(238,206,140,0.34)');
+      rg.addColorStop(1, 'rgba(190,128,48,0)');
+      g.fillStyle = rg;
+      g.beginPath(); g.arc(x, y, r * 2.2, 0, Math.PI * 2); g.fill();
     }
   } else if (eraName === 'burial') {
     // 绿锈剥金：大片绿锈吞掉铜身，缝隙里还留着金色残点
@@ -1870,9 +1870,9 @@ let burst = [];
 /* ---- 生命 / 死亡 ---- */
 // P3.2 难度选择系统：三档难度影响 HP、预警时间、安全窗
 const DIFFICULTIES = {
-  easy:    { name: '简单', maxHP: 3, warnScale: 1.3, safeScale: 1.3, speedScale: 0.9 },
+  easy:    { name: '简单', maxHP: 3, warnScale: 1.4, safeScale: 1.5, speedScale: 1.06 },
   normal:  { name: '普通', maxHP: 2, warnScale: 1.0, safeScale: 1.0, speedScale: 1.0 },
-  hard:    { name: '困难', maxHP: 1, warnScale: 0.7, safeScale: 0.7, speedScale: 1.15 }
+  hard:    { name: '困难', maxHP: 1, warnScale: 0.6, safeScale: 0.55, speedScale: 0.94 }
 };
 let currentDifficulty = 'normal';
 let MAXHP = 2;  // 运行时根据难度动态设置
@@ -2371,7 +2371,8 @@ function step(dt) {
   const dir = (input.right ? 1 : 0) - (input.left ? 1 : 0);
   if (dir !== 0) {
     player.vx += dir * ACC * dt;
-    player.vx = clamp(player.vx, -SPEED, SPEED);
+    const spd = SPEED * DIFFICULTIES[currentDifficulty].speedScale;  // P4.5 接入速度难度（原为死代码）
+    player.vx = clamp(player.vx, -spd, spd);
     player.face = dir;
   } else {
     const d = FRIC * dt;
@@ -12345,7 +12346,7 @@ function drawEnding() {
 
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  radialGlow(W / 2, 300, 240, 'rgba(255,215,130,0.13)');
+  radialGlow(W / 2, 300, 240, 'rgba(255,215,130,0.06)');
   ctx.restore();
 
   /* ---- P1.6 结局彩蛋 · 金箔剥落 ---- */
