@@ -1933,8 +1933,8 @@ const TUT_HINTS_BY_LEVEL = [
   // 时机必须贴住玩法：第一个观众在 x=280、第一块高台在 x=400-600。
   // 原来"跳高台"提示在 x=800——玩家读到时高台已经走过了。提前到 380（高台正下方）。
   [
-    { x: 200,  text: '有人举起手机——屏幕一亮就要爆闪，先离他远点' },
-    { x: 380,  text: '跳上高台就出了闪光的范围——高台是避难所' },
+    { x: 200,  text: '举手机的观众会闪光——它脚下红圈就是范围，手机一亮就跑' },
+    { x: 380,  text: '跳上绿色箭头的石台——出了红圈，高台是避难所' },
     { x: 1600, text: '最后一段了——稳住节奏，别抢' }
   ]
 ];
@@ -5695,6 +5695,19 @@ function drawPlatforms() {
         ctx.ellipse(px + pw * 0.5, 616, pw * 0.48, 7, 0, 0, Math.PI * 2);
         ctx.fill();
       }
+      // 一眼看懂：台面上方一个向上的绿色箭头，标明「跳上来＝安全避难所」
+      ctx.save();
+      const safeX = px + pw * 0.5;
+      ctx.strokeStyle = 'rgba(150,240,185,0.75)';
+      ctx.fillStyle = 'rgba(150,240,185,0.75)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(safeX, py - 27);
+      ctx.lineTo(safeX - 8, py - 13);
+      ctx.lineTo(safeX + 8, py - 13);
+      ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(safeX, py - 27); ctx.lineTo(safeX, py - 39); ctx.stroke();
+      ctx.restore();
     } else {
       ctx.fillStyle = 'rgba(255,235,190,0.30)';
       ctx.fillRect(px, py, pw, 2);
@@ -6611,31 +6624,31 @@ function drawHazards() {
         // 常态就要看得见：0.02 填充 / 0.085 边线在黑地面上约等于没有，
         // 玩家只有被闪一次才会知道"原来这里有个圈"。提到 0.05 / 0.16，
         // 让"观众脚下有一圈范围"这件事在静止时也成立。
-        const baseA = ph === 'aim' ? 0.070 + 0.085 * pp : 0.048;
+        const baseA = ph === 'aim' ? 0.13 + 0.15 * pp : 0.09;
         ctx.save();
         // 圈内只留极淡的一层（给个体积感）。第一版画成了实心大椭圆，
         // 三个观众就是三个巨大的水洼，比光柱还抢眼——范围是给"判断"用的，不是给"看"用的。
         if (baseA > 0.03) {
           const dg = ctx.createRadialGradient(cx, gyE, projR * 0.10, cx, gyE, projR);
-          dg.addColorStop(0, `rgba(150,204,234,${baseA.toFixed(3)})`);
-          dg.addColorStop(1, 'rgba(140,196,228,0)');
+          dg.addColorStop(0, `rgba(255,116,70,${baseA.toFixed(3)})`);
+          dg.addColorStop(1, 'rgba(255,90,50,0)');
           ctx.fillStyle = dg;
           ctx.beginPath();
           ctx.ellipse(cx, gyE, projR, projRy, 0, 0, Math.PI * 2);
           ctx.fill();
         }
         // 边界线：常态可读（0.16），预警期更亮；玩家自己在圈里时再亮一档并转暖
-        const edgeA = ph === 'aim' ? 0.22 + 0.30 * pp : 0.16;
-        ctx.strokeStyle = `rgba(${inDanger ? '255,224,190' : '188,224,246'},${Math.min(0.60, edgeA + (inDanger ? 0.24 : 0)).toFixed(3)})`;
-        ctx.lineWidth = inDanger ? 1.7 : 1.1;
+        const edgeA = ph === 'aim' ? 0.55 + 0.35 * pp : 0.42;
+        ctx.strokeStyle = `rgba(${inDanger ? '255,64,36' : '255,110,78'},${Math.min(0.95, edgeA + (inDanger ? 0.30 : 0)).toFixed(3)})`;
+        ctx.lineWidth = inDanger ? 2.4 : 1.6;
         ctx.beginPath();
         ctx.ellipse(cx, gyE, projR, projRy, 0, 0, Math.PI * 2);
         ctx.stroke();
         // 收缩环：1.55 倍半径收到 1 倍，环压到边界线上＝爆闪那一刻
         if (ph === 'aim') {
           const ringR = projR * (1.55 - 0.55 * pp);
-          ctx.strokeStyle = `rgba(232,246,255,${(0.14 + 0.34 * pp).toFixed(3)})`;
-          ctx.lineWidth = 1.4 + 0.9 * pp;
+          ctx.strokeStyle = `rgba(255,196,140,${(0.32 + 0.44 * pp).toFixed(3)})`;
+          ctx.lineWidth = 1.8 + 1.1 * pp;
           ctx.beginPath();
           ctx.ellipse(cx, gyE, ringR, projRy * (ringR / projR), 0, 0, Math.PI * 2);
           ctx.stroke();
@@ -6724,10 +6737,14 @@ function drawHazards() {
         ctx.fillRect(-3, -6, 6, 12);
         ctx.restore();
       } else {
-        // rest 也留一点微光：观众是危险源，不该是黑背景里的隐形人。
-        // 屏幕常亮一小点，玩家一眼扫过去就知道"这人举着手机"，
+        // rest 也要让"这是危险源"一眼成立：黑背景里一个常亮的小光源。
+        // 手机屏幕持续发暖黄光 + 一圈小光晕，玩家扫一眼就知道"那个人举着会闪光的东西"，
         // 而不是等它爆闪了才反应过来。
-        ctx.fillStyle = 'rgba(172,200,214,0.42)';
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        radialGlow(0, 0, 17, 'rgba(255,190,110,0.42)');
+        ctx.restore();
+        ctx.fillStyle = 'rgba(255,214,150,0.88)';
         ctx.fillRect(-3, -6, 6, 12);
       }
       ctx.restore();
