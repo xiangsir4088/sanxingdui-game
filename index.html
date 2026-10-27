@@ -7529,6 +7529,10 @@ const ERA = {
   }
 };
 const ERA_ORDER = ['forge', 'ritual', 'burial', 'dig', 'museum'];
+// 五个时代的中文短名：HUD 徽章、介绍页时间轴、结局页时间轴共用一份。
+// 原先 HUD 里另有一份同内容的局部 map，介绍页时间轴则直接打印了 era 的英文 key
+// （forge / ritual / dig / museum），整套中文 UI 里突然冒出英文——这里统一收口。
+const ERA_SHORT = { forge: '熔金', ritual: '祭祀', burial: '埋藏', dig: '出土', museum: '展陈' };
 function getEra() { return ERA[ERA_ORDER[levelIdx]] || ERA.museum; }
 function eraTheme2Era(t) {
   return { forge: 'forge', ritual: 'ritual', burial: 'burial', dig: 'dig', museum: 'museum' }[t] || 'museum';
@@ -8418,7 +8422,6 @@ function drawHUD() {
     dig:    { fill: 'rgba(150,130,90,0.20)',  border: 'rgba(180,170,130,0.6)',  text: '#b0a088' },
     museum: { fill: 'rgba(90,150,120,0.22)',  border: 'rgba(140,200,170,0.7)',  text: '#a0c8b0' }
   };
-  const eraShort = { forge: '熔金', ritual: '祭祀', burial: '埋藏', dig: '出土', museum: '展陈' };
   const eraYears = { forge: '前1600', ritual: '前1300', burial: '—', dig: '1986', museum: '今日' };
   const ec = eraColors[eraName] || eraColors.museum;
   const bx = 55, by = 66, bw = 445, bh = 40;
@@ -8502,7 +8505,7 @@ function drawHUD() {
     ctx.fillStyle = cur ? ec.text : (past ? 'rgba(220,210,180,0.55)' : 'rgba(200,200,180,0.35)');
     ctx.font = cur ? '700 10px "Microsoft YaHei", sans-serif'
                    : '10px "Microsoft YaHei", sans-serif';
-    ctx.fillText(eraShort[ERA_ORDER[i]], dotX, by + bh - 1);
+    ctx.fillText(ERA_SHORT[ERA_ORDER[i]], dotX, by + bh - 1);
   }
   ctx.restore();
   ctx.textAlign = 'left';
@@ -9549,6 +9552,18 @@ function drawIntroEvolve() {
   });
 
   // 底部时间轴标签（当前 era 高亮）
+  // 这一行贴着版面下沿，中间那格（x=300）正好落在面具的颈部上：
+  // 未选中的标签是 0.35 透明度的灰字，叠在亮金色铜面上等于隐形——
+  // 第 3/4/5 关的「埋藏」直接被吃掉。加一条横贯的柔和压暗带兜底，
+  // 顺带把颈尖压回背景层，整块左栏才有前后深浅。
+  const lblPlate = ctx.createLinearGradient(0, 470, 0, 524);
+  lblPlate.addColorStop(0,    'rgba(4,9,8,0)');
+  lblPlate.addColorStop(0.42, 'rgba(4,9,8,0.62)');
+  lblPlate.addColorStop(0.72, 'rgba(4,9,8,0.62)');
+  lblPlate.addColorStop(1,    'rgba(4,9,8,0)');
+  ctx.fillStyle = lblPlate;
+  ctx.fillRect(56, 470, 508, 54);
+
   const tlY2 = 500;
   ctx.textAlign = 'center';
   ctx.font = '11px "Microsoft YaHei", sans-serif';
@@ -9564,7 +9579,7 @@ function drawIntroEvolve() {
     ctx.fillStyle = cur ? evolveLabelMap[tk.era].color : 'rgba(200,200,180,0.35)';
     ctx.font = cur ? '700 12px "Microsoft YaHei", sans-serif'
                    : '11px "Microsoft YaHei", sans-serif';
-    ctx.fillText(tk.era, tk.x, tlY2);
+    ctx.fillText(ERA_SHORT[tk.era], tk.x, tlY2);
     ctx.fillStyle = cur ? 'rgba(230,220,180,0.85)' : 'rgba(180,180,160,0.35)';
     ctx.font = '10px "Microsoft YaHei", sans-serif';
     ctx.fillText(tk.yr, tk.x, tlY2 + 14);
@@ -9878,10 +9893,17 @@ function render() {
     ctx.fillRect(0, 0, W, H);
   }
 
-  drawHUD();
-  drawSubtitle();
-  drawTutHint();   // P1.4：每关各自的机制提示（仅 play 状态可见）
-  drawTouch();     // P0.5：触屏虚拟键（仅在启用触屏后显示）
+  // intro / clear / entering 会在下面各自盖一层近不透明的演出层（0.94 / 0.86），
+  // 但 HUD 是先画的——剩下那 6%~14% 会透出来变成一层"鬼影文字"，直接压在
+  // 介绍页自己的标题上（左上角「关卡名＋三千年演化徽章＋键盘手柄提示＋光尘计数」
+  // 与「燎祭之夜」糊成一片）。这几种状态属于过场，本来就不该带游戏内 HUD。
+  const isOverlayState = (state === 'intro' || state === 'clear' || state === 'entering');
+  if (!isOverlayState) {
+    drawHUD();
+    drawSubtitle();
+    drawTutHint();   // P1.4：每关各自的机制提示（仅 play 状态可见）
+    drawTouch();     // P0.5：触屏虚拟键（仅在启用触屏后显示）
+  }
 
   if (state === 'intro') drawIntro();
   if (state === 'clear') drawClear();
