@@ -1762,17 +1762,20 @@ const LEVELS = [
     // 所有博物馆都明令禁止。改用闪光灯之后，玩家自己的动作成了文物受损的原因，
     // 这比"躲保安系统"重得多，也和背景里已经画好的"举相机观众"接上了。
     // 判定是圆形半径，站上高台就出了范围——高台＝避难所。
-    // 节奏（P4.2 重调）：原来的 7 灯 × on 0.22 × 周期 1.7~1.8s，等于平均每 0.25 秒
-    // 就有一盏在爆闪，配合整屏 0.26 的泛白，玩家全程在灰白画面里摸路——这才是
-    // 「不知道该怎么玩」的真正来源。现在 6 灯、on 收到 0.15（真闪光灯就是"啪"一下），
-    // 周期拉到 1.9~2.2s，留出能看清路的呼吸窗。
+    // 节奏（P4.7 回调）：P4.2 为修"看不清路"把节奏一路削到 6 灯 × on 0.15 × off 1.30~1.45，
+    // 结果安全窗长达 1.95s、伤害只占 7.5%，"会躲的人"几乎 100% 无伤通过——关卡变成
+    // "看红灯→停下等→走"的等待游戏，可玩性归零（用户："远不如早些时候版本的难度"）。
+    // 现在把节奏拉回接近早期版本的密度：on 0.22（爆闪有实感）、off 0.84~0.92（安全窗收紧到
+    // 够一次穿越但不够闲逛）、warn 0.50~0.58（仍够看清红圈再决定）。灯位仍保持 6 盏对齐展柜。
+    // 安全窗 = warn + off ≈ 1.4s，穿越一盏灯的判定直径（2×121.5=243px ≈ 0.7s）刚好可行，
+    // 也就是"必须一次果断穿过去，犹豫就会被下一波闪到"。
     hazards: [
-      { t: 'flash', x: 280,  gy: 620, r: 108, warn: 0.60, on: 0.15, off: 1.45, ph: 0.0 },
-      { t: 'flash', x: 620,  gy: 620, r: 108, warn: 0.55, on: 0.15, off: 1.40, ph: 0.76 },
-      { t: 'flash', x: 960,  gy: 620, r: 108, warn: 0.56, on: 0.15, off: 1.42, ph: 1.52 },
-      { t: 'flash', x: 1300, gy: 620, r: 108, warn: 0.52, on: 0.15, off: 1.33, ph: 0.36 },
-      { t: 'flash', x: 1660, gy: 620, r: 108, warn: 0.53, on: 0.15, off: 1.36, ph: 1.14 },
-      { t: 'flash', x: 2000, gy: 620, r: 108, warn: 0.50, on: 0.15, off: 1.30, ph: 1.90 }
+      { t: 'flash', x: 280,  gy: 620, r: 108, warn: 0.58, on: 0.22, off: 0.92, ph: 0.0 },
+      { t: 'flash', x: 620,  gy: 620, r: 108, warn: 0.54, on: 0.22, off: 0.88, ph: 0.76 },
+      { t: 'flash', x: 960,  gy: 620, r: 108, warn: 0.55, on: 0.22, off: 0.90, ph: 1.52 },
+      { t: 'flash', x: 1300, gy: 620, r: 108, warn: 0.52, on: 0.22, off: 0.86, ph: 0.36 },
+      { t: 'flash', x: 1660, gy: 620, r: 108, warn: 0.53, on: 0.22, off: 0.88, ph: 1.14 },
+      { t: 'flash', x: 2000, gy: 620, r: 108, warn: 0.50, on: 0.22, off: 0.84, ph: 1.90 }
     ],
     lines: [
       { x: 300, text: '展柜前有人举起手机——屏幕一亮，就该躲了。' },
@@ -1870,9 +1873,14 @@ let burst = [];
 /* ---- 生命 / 死亡 ---- */
 // P3.2 难度选择系统：三档难度影响 HP、预警时间、安全窗
 const DIFFICULTIES = {
-  easy:    { name: '简单', maxHP: 3, warnScale: 1.4, safeScale: 1.5, speedScale: 1.06 },
-  normal:  { name: '普通', maxHP: 2, warnScale: 1.0, safeScale: 1.0, speedScale: 1.0 },
-  hard:    { name: '困难', maxHP: 1, warnScale: 0.6, safeScale: 0.55, speedScale: 0.94 }
+  // warnScale/safeScale 为「通用」口径（矿刺等，保持原值不动）；flash* 只作用于第 5 关闪光灯。
+  // P4.7：第五关单独重配——预警够看清(1.0~1.2)，安全窗收紧(0.85)，爆闪随难度变长(1.15)。
+  easy:    { name: '简单', maxHP: 3, warnScale: 1.4, safeScale: 1.5,  speedScale: 1.06,
+             flashWarnScale: 1.2, flashSafeScale: 1.4,  flashOnScale: 0.80 },
+  normal:  { name: '普通', maxHP: 2, warnScale: 1.0, safeScale: 1.0,  speedScale: 1.0,
+             flashWarnScale: 1.0, flashSafeScale: 1.0,  flashOnScale: 1.00 },
+  hard:    { name: '困难', maxHP: 1, warnScale: 0.6, safeScale: 0.55, speedScale: 0.94,
+             flashWarnScale: 1.0, flashSafeScale: 0.85, flashOnScale: 1.15 }
 };
 let currentDifficulty = 'normal';
 let MAXHP = 2;  // 运行时根据难度动态设置
@@ -2047,9 +2055,13 @@ function loadLevel(i) {
     const c = Object.assign({}, h, { rect: null, cur: 0, firing: false });
     // P3.2 难度缩放：预警/激活/安全窗按难度比例调整
     const diff = DIFFICULTIES[currentDifficulty];
-    c.warn = h.warn * diff.warnScale;
-    c.on = h.on * diff.warnScale;  // 激活时间也缩放（困难更短预警更紧凑）
-    c.off = h.off * diff.safeScale;
+    const isFlash = h.t === 'flash';
+    // P4.7：闪光灯走 flash* 专用系数（通用 warnScale/safeScale 保持原值，不动第 2/3 关矿刺）。
+    // 顺带修 bug：原来 c.on = h.on * warnScale，导致困难档爆闪反被缩到 0.09s
+    //（伤害窗更小＝更容易钻过去），与"困难"完全相反；现在困难档爆闪更长(×1.15)。
+    c.warn = h.warn * (isFlash ? diff.flashWarnScale : diff.warnScale);
+    c.on   = h.on   * (isFlash ? diff.flashOnScale   : diff.warnScale);
+    c.off  = h.off  * (isFlash ? diff.flashSafeScale : diff.safeScale);
     // rock 专属：每块土块形态都不同（真夯土块从坑壁脱落，形状不规则）
     if (h.t === 'rock') {
       // 6 个环状不规则顶点（归一化 [-1,1]，绘制时按 size 缩放）
