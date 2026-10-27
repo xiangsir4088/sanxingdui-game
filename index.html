@@ -1762,14 +1762,17 @@ const LEVELS = [
     // 所有博物馆都明令禁止。改用闪光灯之后，玩家自己的动作成了文物受损的原因，
     // 这比"躲保安系统"重得多，也和背景里已经画好的"举相机观众"接上了。
     // 判定是圆形半径，站上高台就出了范围——高台＝避难所。
+    // 节奏（P4.2 重调）：原来的 7 灯 × on 0.22 × 周期 1.7~1.8s，等于平均每 0.25 秒
+    // 就有一盏在爆闪，配合整屏 0.26 的泛白，玩家全程在灰白画面里摸路——这才是
+    // 「不知道该怎么玩」的真正来源。现在 6 灯、on 收到 0.15（真闪光灯就是"啪"一下），
+    // 周期拉到 1.9~2.2s，留出能看清路的呼吸窗。
     hazards: [
-      { t: 'flash', x: 235,  gy: 620, r: 108, warn: 0.55, on: 0.22, off: 1.05, ph: 0.0 },
-      { t: 'flash', x: 520,  gy: 620, r: 108, warn: 0.46, on: 0.22, off: 0.95, ph: 0.9 },
-      { t: 'flash', x: 810,  gy: 620, r: 108, warn: 0.48, on: 0.22, off: 0.92, ph: 1.8 },
-      { t: 'flash', x: 1110, gy: 620, r: 108, warn: 0.44, on: 0.22, off: 0.88, ph: 0.45 },
-      { t: 'flash', x: 1400, gy: 620, r: 108, warn: 0.46, on: 0.22, off: 0.90, ph: 2.4 },
-      { t: 'flash', x: 1720, gy: 620, r: 108, warn: 0.44, on: 0.22, off: 0.86, ph: 1.3 },
-      { t: 'flash', x: 1990, gy: 620, r: 108, warn: 0.42, on: 0.22, off: 0.82, ph: 3.1 }
+      { t: 'flash', x: 280,  gy: 620, r: 108, warn: 0.60, on: 0.15, off: 1.45, ph: 0.0 },
+      { t: 'flash', x: 620,  gy: 620, r: 108, warn: 0.55, on: 0.15, off: 1.40, ph: 0.76 },
+      { t: 'flash', x: 960,  gy: 620, r: 108, warn: 0.56, on: 0.15, off: 1.42, ph: 1.52 },
+      { t: 'flash', x: 1300, gy: 620, r: 108, warn: 0.52, on: 0.15, off: 1.33, ph: 0.36 },
+      { t: 'flash', x: 1660, gy: 620, r: 108, warn: 0.53, on: 0.15, off: 1.36, ph: 1.14 },
+      { t: 'flash', x: 2000, gy: 620, r: 108, warn: 0.50, on: 0.15, off: 1.30, ph: 1.90 }
     ],
     lines: [
       { x: 300, text: '展柜前有人举起手机——屏幕一亮，就该躲了。' },
@@ -4438,12 +4441,16 @@ function bgMuseum() {
   ctx.globalCompositeOperation = 'lighter';
   for (let i = 0; i < 4; i++) {
     const x = 300 + i * 320 - (cam.x * 0.25 % 320);
-    const g = ctx.createRadialGradient(x, 200, 4, x, 200, 200);
-    g.addColorStop(0, 'rgba(255,220,150,0.08)');
+    /* 0.08 太淡，等于没画：墙面从 30 到 260 是一整片近黑，
+       上面打下来的五道光柱落不到任何东西上，看着像"光悬在空中"。
+       提到 0.16 之后光柱在墙上有了承接的光斑，那 120px 的挑高才像个厅。 */
+    const g = ctx.createRadialGradient(x, 196, 4, x, 196, 248);
+    g.addColorStop(0, 'rgba(255,220,150,0.16)');
+    g.addColorStop(0.45, 'rgba(255,214,142,0.07)');
     g.addColorStop(1, 'rgba(255,220,150,0)');
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.arc(x, 200, 200, 0, Math.PI * 2);
+    ctx.arc(x, 196, 248, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.restore();
@@ -4491,21 +4498,27 @@ function bgMuseum() {
     ctx.restore();
   }
 
-  // ---------- ⑤ 射灯光锥（从每个射灯口照到地面）----------
+  // ---------- ⑤ 射灯光锥（压成雾，不再抢玩法层）----------
+  /* 这五道光柱原来从吊顶一路贯到地面（y=620），alpha 0.22：整块玩家活动区都被
+     压在五条高对比亮带下面，平台边缘、观众剪影、危险范围全淹没在同一片光里——
+     一进关分不清哪儿是地、哪儿是台子、哪儿会挨闪。
+     但也不能整条撤掉：撤掉之后 y 480~600 变成一大片死黑，比原来更像"没画完"。
+     所以压成雾——峰值 0.15→0.06，让它只负责"这是个高挑的展厅"，
+     顺带把空气填满，而不再跟平台、剪影、危险圈抢对比度。 */
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
   for (let i = -1; i < 6; i++) {
     const sx = spotStart + i * spotSpacing + 120;
     const g = ctx.createLinearGradient(sx, 40, sx, 620);
-    g.addColorStop(0, 'rgba(255,235,180,0.22)');
-    g.addColorStop(0.5, 'rgba(255,235,180,0.10)');
+    g.addColorStop(0, 'rgba(255,235,180,0.075)');
+    g.addColorStop(0.42, 'rgba(255,235,180,0.042)');
     g.addColorStop(1, 'rgba(255,235,180,0)');
     ctx.fillStyle = g;
     ctx.beginPath();
     ctx.moveTo(sx - 10, 40);
     ctx.lineTo(sx + 10, 40);
-    ctx.lineTo(sx + 90, 620);
-    ctx.lineTo(sx - 90, 620);
+    ctx.lineTo(sx + 84, 620);
+    ctx.lineTo(sx - 84, 620);
     ctx.closePath();
     ctx.fill();
   }
@@ -5612,13 +5625,16 @@ function drawGroundSection(px, py, pw, ph, worldX) {
       ctx.stroke();
     }
     // 石面反光：顶部一条冷白灯带反射 + 一条更亮的贴边
-    const rg = ctx.createLinearGradient(0, py, 0, py + 26);
-    rg.addColorStop(0, 'rgba(190,214,240,0.16)');
+    const rg = ctx.createLinearGradient(0, py, 0, py + 30);
+    rg.addColorStop(0, 'rgba(190,214,240,0.26)');
     rg.addColorStop(1, 'rgba(190,214,240,0)');
     ctx.fillStyle = rg;
-    ctx.fillRect(px, py, pw, 26);
-    ctx.fillStyle = 'rgba(226,236,252,0.34)';
-    ctx.fillRect(px, py, pw, 1.4);
+    ctx.fillRect(px, py, pw, 30);
+    /* 地表线要够亮。这一条是整关唯一告诉玩家"路在这一层"的东西：
+       光柱上移之后，地面本身成了玩家通道的底色，如果连这条线都模糊，
+       画面下半屏就是一整块黑，人根本不知道该踩在哪里。 */
+    ctx.fillStyle = 'rgba(230,242,255,0.52)';
+    ctx.fillRect(px, py, pw, 1.8);
     return;
   }
 }
@@ -5638,10 +5654,48 @@ function drawPlatforms() {
     ctx.fillRect(px, py, pw, ph);
 
     // 顶面高光
-    ctx.fillStyle = 'rgba(255,235,190,0.30)';
-    ctx.fillRect(px, py, pw, 2);
-    ctx.fillStyle = `rgba(${level.theme === 'dig' ? '255,240,200' : '150,220,190'},0.14)`;
-    ctx.fillRect(px, py + 2, pw, 7);
+    if (level.theme === 'museum' && ph <= 60) {
+      /* 第五关是唯一「高台＝避难所」的关卡，可这些小石台原来和地面共用同一套深色渐变，
+         再被五道光柱压住，玩家读不出这是能站的东西——只会当成展柜底座的横梁。
+         展厅里能站人的磨光石台，一定比地面亮一档：贴边亮线 + 台面光池 + 端头竖边，
+         三样加起来才叫「一块有厚度的实体台」，而不是一条贴纸。 */
+      ctx.fillStyle = 'rgba(234,246,255,0.66)';
+      ctx.fillRect(px, py, pw, 2.2);                       // 贴边亮线＝可站立表面的通用语言
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const poolG = ctx.createLinearGradient(px, 0, px + pw, 0);
+      poolG.addColorStop(0, 'rgba(210,236,255,0)');
+      poolG.addColorStop(0.5, 'rgba(210,236,255,0.15)');
+      poolG.addColorStop(1, 'rgba(210,236,255,0)');
+      ctx.fillStyle = poolG;
+      ctx.fillRect(px, py + 2.2, pw, 13);                  // 射灯漏到台面上的光池
+      ctx.restore();
+      const eg = ctx.createLinearGradient(0, py + 2, 0, py + 18);
+      eg.addColorStop(0, 'rgba(176,212,238,0.22)');
+      eg.addColorStop(1, 'rgba(176,212,238,0)');
+      ctx.fillStyle = eg;
+      ctx.fillRect(px, py + 2, pw, 16);                    // 台沿内侧衰减
+      ctx.fillStyle = 'rgba(214,236,252,0.30)';
+      ctx.fillRect(px, py, 1.6, Math.min(ph, 30));         // 端头竖边：读出厚度
+      ctx.fillRect(px + pw - 1.6, py, 1.6, Math.min(ph, 30));
+      /* 台下的落影。这块板只有 26px 厚，悬在地面上方 150px——
+         少了影子它就永远读成"贴在背景上的一条横梁"，玩家不会想到能站上去。
+         有影子才有"这是架在地面上方的一件实物"这个空间关系。 */
+      if (py + ph < 600) {
+        const shg = ctx.createRadialGradient(px + pw * 0.5, 616, 4, px + pw * 0.5, 616, pw * 0.52);
+        shg.addColorStop(0, 'rgba(0,0,0,0.30)');
+        shg.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = shg;
+        ctx.beginPath();
+        ctx.ellipse(px + pw * 0.5, 616, pw * 0.48, 7, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else {
+      ctx.fillStyle = 'rgba(255,235,190,0.30)';
+      ctx.fillRect(px, py, pw, 2);
+      ctx.fillStyle = `rgba(${level.theme === 'dig' ? '255,240,200' : '150,220,190'},0.14)`;
+      ctx.fillRect(px, py + 2, pw, 7);
+    }
 
     // 侧面纹理
     ctx.strokeStyle = 'rgba(0,0,0,0.35)';
@@ -6535,6 +6589,52 @@ function drawHazards() {
       const pp = h.phaseP || 0;
       const phoneX = cx + 24, phoneY = gy - 96;
 
+      /* ---------- 地面危险区：这一关唯一真正的玩法信息 ----------
+         以前完全没有。爆闪只有 0.22 秒，玩家看到白光的那一刻血已经扣了，
+         一进关只能靠"被闪死几次"去猜范围——这就是"不知道怎么玩"的根源。
+         现在把判定半径直接画在地上，三个阶段各对应一个动作：
+           常态 → 淡椭圆＝范围在这儿
+           预警 → 边线亮起 + 一圈从外向内收（收到边界上就爆）
+           爆闪 → 圈消失，白光接管画面
+         站进圈里时边线再加亮一档，等于当场提示"你现在会挨闪"。 */
+      const gyE = gy - 1;
+      const projR = h.r * 1.12;                     // 与判定同口径：burstR + player.r*0.5
+      const projRy = h.r * 0.17;                    // 压到贴地的程度，才像地上的圈而不是立着的球
+      if (ph !== 'burst') {
+        const pdx = player.x - h.bx, pdy = player.y - h.by;
+        const inDanger = (pdx * pdx + pdy * pdy) < Math.pow(h.r + player.r * 0.5, 2);
+        const baseA = ph === 'aim' ? 0.055 + 0.075 * pp : 0.020;
+        ctx.save();
+        // 圈内只留极淡的一层（给个体积感）。第一版画成了实心大椭圆，
+        // 三个观众就是三个巨大的水洼，比光柱还抢眼——范围是给"判断"用的，不是给"看"用的。
+        if (baseA > 0.03) {
+          const dg = ctx.createRadialGradient(cx, gyE, projR * 0.10, cx, gyE, projR);
+          dg.addColorStop(0, `rgba(150,204,234,${baseA.toFixed(3)})`);
+          dg.addColorStop(1, 'rgba(140,196,228,0)');
+          ctx.fillStyle = dg;
+          ctx.beginPath();
+          ctx.ellipse(cx, gyE, projR, projRy, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        // 边界线：常态极淡，预警期变亮；玩家自己在圈里时再亮一档并转暖
+        const edgeA = ph === 'aim' ? 0.18 + 0.30 * pp : 0.085;
+        ctx.strokeStyle = `rgba(${inDanger ? '255,224,190' : '188,224,246'},${Math.min(0.60, edgeA + (inDanger ? 0.24 : 0)).toFixed(3)})`;
+        ctx.lineWidth = inDanger ? 1.7 : 1.1;
+        ctx.beginPath();
+        ctx.ellipse(cx, gyE, projR, projRy, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        // 收缩环：1.55 倍半径收到 1 倍，环压到边界线上＝爆闪那一刻
+        if (ph === 'aim') {
+          const ringR = projR * (1.55 - 0.55 * pp);
+          ctx.strokeStyle = `rgba(232,246,255,${(0.14 + 0.34 * pp).toFixed(3)})`;
+          ctx.lineWidth = 1.4 + 0.9 * pp;
+          ctx.beginPath();
+          ctx.ellipse(cx, gyE, ringR, projRy * (ringR / projR), 0, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
       // ---------- 地面影子 ----------
       ctx.fillStyle = 'rgba(0,0,0,0.45)';
       ctx.beginPath();
@@ -6597,10 +6697,13 @@ function drawHazards() {
       ctx.fillRect(-4.5, -7.5, 9, 15);
       if (ph === 'aim') {
         // 预警：屏幕由暗转亮，越接近爆闪越亮——这是玩家唯一能读的信号
+        /* 原来光晕只有 16~42px、alpha 0.30。手机屏本身是 6×12px 的小方块，
+           在 1280 的画面上几乎看不见，等于"没有预警"，玩家只能靠被闪死来学范围。
+           现在光晕推到 20~54px、alpha 0.52，暗展厅里像一盏正在充能的小灯。 */
         const lit = 0.25 + 0.75 * pp;
         ctx.save();
         ctx.globalCompositeOperation = 'lighter';
-        radialGlow(0, 0, 16 + 26 * pp, `rgba(255,250,225,${(0.30 * lit).toFixed(3)})`);
+        radialGlow(0, 0, 20 + 34 * pp, `rgba(255,250,225,${(0.52 * lit).toFixed(3)})`);
         ctx.restore();
         ctx.fillStyle = `rgba(255,252,235,${(0.45 + 0.55 * lit).toFixed(3)})`;
         ctx.fillRect(-3, -6, 6, 12);
@@ -6622,9 +6725,15 @@ function drawHazards() {
         ctx.save();
         ctx.globalCompositeOperation = 'lighter';
         const g = ctx.createRadialGradient(phoneX, phoneY, 1, phoneX, phoneY, R);
-        g.addColorStop(0, 'rgba(255,255,255,0.92)');
-        g.addColorStop(0.30, 'rgba(255,252,238,0.52)');
-        g.addColorStop(1, 'rgba(255,246,214,0)');
+        /* 光心原来是 0.92 的一整团白，半径直接等于判定半径 108——
+           结果爆闪时是一个直径 216 的实心白球，把半个展柜连同地面一起吃掉，
+           玩家那一下完全失去方位感。真闪光灯是"点"极亮、溢出很快衰减：
+           核心收到 0.58，再加一档 0.14 处的过渡，让亮区集中在手机附近，
+           外围只留一层薄薄的余光——够刺、但不再是一块盖住画面的白饼。 */
+        g.addColorStop(0, 'rgba(255,255,255,0.58)');
+        g.addColorStop(0.14, 'rgba(255,252,238,0.36)');
+        g.addColorStop(0.42, 'rgba(255,246,220,0.13)');
+        g.addColorStop(1, 'rgba(255,240,205,0)');
         ctx.fillStyle = g;
         ctx.beginPath(); ctx.arc(phoneX, phoneY, R, 0, Math.PI * 2); ctx.fill();
         // 横向眩光：真闪光灯在镜头上留下的是一条横贯的光条，不是一圈完整的扩散环。
@@ -9099,6 +9208,18 @@ function drawPlayer() {
   ctx.fill();
   ctx.restore();
 
+  /* 第五关：暗展厅 + 深色地面，玩家是个青铜绿小头像，几乎整块融进背景
+     （截图里它贴在左下角，我第一眼都没找到"我在哪"）。不能靠加亮本体解决——
+     那会让它变成一块发光的绿饼。垫一层极淡的暖光在身后就够：
+     画面里唯一带暖色边缘的东西，人眼会自动锁定，而且语义上说得通——
+     它本来就是被射灯照着的展品。 */
+  if (level.theme === 'museum') {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    radialGlow(px, py - player.r * 0.15, player.r * 3.0, 'rgba(255,212,150,0.075)');
+    ctx.restore();
+  }
+
   // 青铜头像本体
   // 头部摆动惯性：基于水平速度做低通滤波，避免转向时生硬跳跃
   if (player._tiltS === undefined) player._tiltS = 0;
@@ -9223,7 +9344,10 @@ function drawHUD() {
   };
   const eraYears = { forge: '前13世纪', ritual: '前1300', burial: '—', dig: '1986', museum: '今日' };
   const ec = eraColors[eraName] || eraColors.museum;
-  const bx = 55, by = 66, bw = 445, bh = 40;
+  /* bh 40→46：40 的高度装不下「轴线 + 圆点 + 时代短名」三行，
+     短名的 baseline 只能落在 by+bh-1，正好压在下边框线上（截图里「展陈」
+     被一条横线穿过、还被脉冲环吃掉半个字）。加高 6px 给标签留出净空。 */
+  const bx = 55, by = 66, bw = 445, bh = 46;
   ctx.save();
   // 背景：深色 + 顶下边缘的金色微渐变（顶部亮、底部暗）
   const badgeG = ctx.createLinearGradient(0, by, 0, by + bh);
@@ -9253,7 +9377,7 @@ function drawHUD() {
   ctx.font = '700 12px "Microsoft YaHei", sans-serif';
   ctx.fillText(era.label + ' · ' + eraYears[eraName], bx + bw - 10, by + 12);
   // 时间轴线
-  const axY = by + 24;
+  const axY = by + 22;
   const axX = bx + 30, axW = bw - 60;
   ctx.strokeStyle = 'rgba(200,180,130,0.32)';
   ctx.lineWidth = 1;
@@ -9304,28 +9428,28 @@ function drawHUD() {
     ctx.fillStyle = cur ? ec.text : (past ? 'rgba(220,210,180,0.55)' : 'rgba(200,200,180,0.35)');
     ctx.font = cur ? '700 10px "Microsoft YaHei", sans-serif'
                    : '10px "Microsoft YaHei", sans-serif';
-    ctx.fillText(ERA_SHORT[ERA_ORDER[i]], dotX, by + bh - 1);
+    ctx.fillText(ERA_SHORT[ERA_ORDER[i]], dotX, by + bh - 5);
   }
   ctx.restore();
   ctx.textAlign = 'left';
 
   ctx.font = '13px "Microsoft YaHei", sans-serif';
   ctx.fillStyle = 'rgba(180,215,200,0.55)';
-  ctx.fillText('键盘：← → / A D 移动 · 空格 跳跃 · R 重来 · Esc 退出 · M 静音', 40, 124);
+  ctx.fillText('键盘：← → / A D 移动 · 空格 跳跃 · R 重来 · Esc 退出 · M 静音', 40, 130);
   ctx.fillStyle = pad.connected ? 'rgba(150,235,190,0.75)' : 'rgba(255,190,120,0.80)';
   ctx.fillText(pad.connected
     ? '手柄：已连接 · 左摇杆/十字键 移动 · 任意键 跳跃 · Back/Select 退出'
     : (!pageActivated && HAS_GAMEPAD_API && !IN_IFRAME
         ? '手柄：待激活 — 先点一下画面或按一下键盘，再按手柄任意键'
-        : '手柄：未检测到（按一下手柄任意键唤醒；USB 需先在系统里识别）'), 40, 142);
+        : '手柄：未检测到（按一下手柄任意键唤醒；USB 需先在系统里识别）'), 40, 148);
   // 手柄实时诊断（便于确认按键编号）
   if (pad.connected) {
     ctx.font = '11px Consolas, monospace';
     ctx.fillStyle = 'rgba(140,225,185,0.45)';
-    ctx.fillText('pad: ' + String(pad.name).slice(0, 44), 40, 158);
+    ctx.fillText('pad: ' + String(pad.name).slice(0, 44), 40, 164);
     ctx.fillText('axes[' + pad.axes + ']  按下键[' + (pad.dbg || '无') + ']  ' +
                  '左' + (pad.left ? 1 : 0) + ' 右' + (pad.right ? 1 : 0) + ' 跳' + (pad.jump ? 1 : 0),
-                 40, 174);
+                 40, 180);
   }
   // 手柄不可用警告：移到右上音效按钮下方，避免遮挡底部游戏画面
   if (IN_IFRAME || !HAS_GAMEPAD_API) {
@@ -9343,10 +9467,10 @@ function drawHUD() {
   // 光尘计数
   ctx.fillStyle = 'rgba(255,230,160,0.9)';
   ctx.font = '600 15px "Microsoft YaHei", sans-serif';
-  ctx.fillText(pickName() + ' ' + collected + ' / ' + level.motes.length, 40, 162);
+  ctx.fillText(pickName() + ' ' + collected + ' / ' + level.motes.length, 40, 168);
   for (let i = 0; i < level.motes.length; i++) {
     const got = i < collected;
-    const cx = 146 + i * 18, cy = 157;
+    const cx = 146 + i * 18, cy = 163;
     if (got) {
       // 已收集：呼吸金色外发光（每颗错相，形成节奏感）
       const pulse = 0.5 + 0.5 * Math.sin(tGlobal * 3 + i * 0.6);
@@ -9377,9 +9501,9 @@ function drawHUD() {
   // 生命
   ctx.font = '600 15px "Microsoft YaHei", sans-serif';
   ctx.fillStyle = 'rgba(235,205,150,0.9)';
-  ctx.fillText('生命', 268, 162);
+  ctx.fillText('生命', 268, 168);
   for (let i = 0; i < MAXHP; i++) {
-    const hx = 318 + i * 24, hy = 157;
+    const hx = 318 + i * 24, hy = 163;
     ctx.beginPath();
     ctx.arc(hx, hy, 8, 0, Math.PI * 2);
     if (i < player.hp) {
@@ -9400,11 +9524,17 @@ function drawHUD() {
   }
 
   // 进度
+  /* 这条进度条原来在 y=150，而「光尘 0/4」的 15px 字顶也在 150——
+     结果一条 380px 宽的横线正好从字头穿过去，"光尘"两个字上多了一道杠。
+     挪到光尘/生命那一行下面（162 的字底 → 174 起），并补一个终点小标记：
+     它同时也是这关唯一告诉玩家"还得往右走多远"的东西。 */
   const pct = clamp(player.x / level.goal.x, 0, 1);
   ctx.fillStyle = 'rgba(255,255,255,0.10)';
-  ctx.fillRect(40, 150, 380, 3);
+  ctx.fillRect(40, 180, 380, 4);
   ctx.fillStyle = 'rgba(255,225,150,0.75)';
-  ctx.fillRect(40, 150, 380 * pct, 3);
+  ctx.fillRect(40, 180, 380 * pct, 4);
+  ctx.fillStyle = 'rgba(255,236,180,0.85)';
+  ctx.fillRect(40 + 380 - 2, 178, 2, 8);            // 终点刻度
 }
 
 /* ---- 退出按钮 ---- */
@@ -12299,16 +12429,24 @@ function render() {
      它本质上是"天光变了"，本来也该照着平台、机关和主角一起变。 */
   if (level.theme === 'dig') drawStormOverlay();
 
-  // 爆闪的整屏泛白。单个机关的光球只照亮它自己的半径，但真实的闪光会把
-  // 整个展厅刷白一下——这一下必须画在屏幕空间，画在世界坐标里会被相机裁掉。
-  let veilA = 0;
+  /* 爆闪的泛白。原来是一层全屏平涂 rgba(...,0.26)：七个灯轮流爆，等于整幅画面
+     每 0.25 秒被刷灰一次，玩家全程像隔着一层毛玻璃走路，连平台边缘都判断不了。
+     现在改成**以爆闪点为中心的径向光**（近处亮、远处不沾），峰值降到 0.16：
+     还是会被"闪一下"，但闪的是那一块地方，不是整个屏幕。 */
+  let veilH = null, veilA = 0;
   for (const hf of haz) {
     if (hf.t === 'flash' && hf.phase === 'burst') {
-      veilA = Math.max(veilA, (1 - (hf.phaseP || 0)) * 0.26);
+      const a = (1 - (hf.phaseP || 0)) * 0.085;
+      if (a > veilA) { veilA = a; veilH = hf; }
     }
   }
-  if (veilA > 0.004) {
-    ctx.fillStyle = `rgba(255,252,242,${veilA.toFixed(3)})`;
+  if (veilA > 0.004 && veilH) {
+    const vx = veilH.x - cam.x + 24, vy = veilH.gy - 96;
+    const vg = ctx.createRadialGradient(vx, vy, 18, vx, vy, 640);
+    vg.addColorStop(0, `rgba(255,252,242,${(veilA * 1.9).toFixed(3)})`);
+    vg.addColorStop(0.45, `rgba(255,250,236,${(veilA * 0.80).toFixed(3)})`);
+    vg.addColorStop(1, 'rgba(255,248,230,0)');
+    ctx.fillStyle = vg;
     ctx.fillRect(0, 0, W, H);
   }
 
