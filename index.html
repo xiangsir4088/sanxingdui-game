@@ -1755,27 +1755,22 @@ const LEVELS = [
       [0, GROUND_Y, 2400, GROUND_H],
       [400, 470, 200, PLAT_H], [1000, 445, 200, PLAT_H], [1600, 470, 200, PLAT_H]
     ],
-    motes: [{ x: 500, y: 415 }, { x: 900, y: 555 }, { x: 1220, y: 555 }, { x: 1730, y: 555 }],
+    motes: [{ x: 500, y: 415 }, { x: 1100, y: 375 }, { x: 1700, y: 415 }, { x: 1300, y: 555 }],
     line: '它站在展柜里，隔着一层玻璃看你。它还在想：我原本，是金的。',
     // 观众闪光灯：博物馆里不存在交叉激光防盗（真实现场是红外/压力/震动报警，
     // 不会有可见光束）。而真正伤文物的是观众手机闪光——紫外与瞬时强光，
     // 所有博物馆都明令禁止。改用闪光灯之后，玩家自己的动作成了文物受损的原因，
     // 这比"躲保安系统"重得多，也和背景里已经画好的"举相机观众"接上了。
     // 判定是圆形半径，站上高台就出了范围——高台＝避难所。
-    // 节奏（P4.7 回调）：P4.2 为修"看不清路"把节奏一路削到 6 灯 × on 0.15 × off 1.30~1.45，
-    // 结果安全窗长达 1.95s、伤害只占 7.5%，"会躲的人"几乎 100% 无伤通过——关卡变成
-    // "看红灯→停下等→走"的等待游戏，可玩性归零（用户："远不如早些时候版本的难度"）。
-    // 现在把节奏拉回接近早期版本的密度：on 0.22（爆闪有实感）、off 0.84~0.92（安全窗收紧到
-    // 够一次穿越但不够闲逛）、warn 0.50~0.58（仍够看清红圈再决定）。灯位仍保持 6 盏对齐展柜。
-    // 安全窗 = warn + off ≈ 1.4s，穿越一盏灯的判定直径（2×121.5=243px ≈ 0.7s）刚好可行，
-    // 也就是"必须一次果断穿过去，犹豫就会被下一波闪到"。
+    // P4.9 还原：回到「能跳」的激光版（用户认可的可玩版本）——闪光灯/红圈机制整体废弃。
+    // 5 道激光：3 道中层（逼中段起跳）+ 2 道低层（逼贴地或跳越），扫描速度 210~255，
+    // 灯头正下方是盲区，玩家靠「起跳穿越 / 卡交错空隙」过关。
     hazards: [
-      { t: 'flash', x: 280,  gy: 620, r: 108, warn: 0.58, on: 0.22, off: 0.92, ph: 0.0 },
-      { t: 'flash', x: 620,  gy: 620, r: 108, warn: 0.54, on: 0.22, off: 0.88, ph: 0.76 },
-      { t: 'flash', x: 960,  gy: 620, r: 108, warn: 0.55, on: 0.22, off: 0.90, ph: 1.52 },
-      { t: 'flash', x: 1300, gy: 620, r: 108, warn: 0.52, on: 0.22, off: 0.86, ph: 0.36 },
-      { t: 'flash', x: 1660, gy: 620, r: 108, warn: 0.53, on: 0.22, off: 0.88, ph: 1.14 },
-      { t: 'flash', x: 2000, gy: 620, r: 108, warn: 0.50, on: 0.22, off: 0.84, ph: 1.90 }
+      { t: 'laser', x0: 260,  x1: 1020, y: 320, w: 24, hgt: 80, spd: 235, ph: 0.0 },
+      { t: 'laser', x0: 900,  x1: 1500, y: 320, w: 24, hgt: 80, spd: 250, ph: 1.2 },
+      { t: 'laser', x0: 1160, x1: 1980, y: 320, w: 24, hgt: 80, spd: 210, ph: 0.6 },
+      { t: 'laser', x0: 320,  x1: 820,  y: 500, w: 26, hgt: 70, spd: 240, ph: 1.8 },
+      { t: 'laser', x0: 1250, x1: 1900, y: 500, w: 26, hgt: 70, spd: 255, ph: 3.0 }
     ],
     lines: [
       { x: 300, text: '展柜前有人举起手机——屏幕一亮，就该躲了。' },
@@ -1873,14 +1868,10 @@ let burst = [];
 /* ---- 生命 / 死亡 ---- */
 // P3.2 难度选择系统：三档难度影响 HP、预警时间、安全窗
 const DIFFICULTIES = {
-  // warnScale/safeScale 为「通用」口径（矿刺等，保持原值不动）；flash* 只作用于第 5 关闪光灯。
-  // P4.7：第五关单独重配——预警够看清(1.0~1.2)，安全窗收紧(0.85)，爆闪随难度变长(1.15)。
-  easy:    { name: '简单', maxHP: 3, warnScale: 1.4, safeScale: 1.5,  speedScale: 1.06,
-             flashWarnScale: 1.2, flashSafeScale: 1.4,  flashOnScale: 0.80 },
-  normal:  { name: '普通', maxHP: 2, warnScale: 1.0, safeScale: 1.0,  speedScale: 1.0,
-             flashWarnScale: 1.0, flashSafeScale: 1.0,  flashOnScale: 1.00 },
-  hard:    { name: '困难', maxHP: 1, warnScale: 0.6, safeScale: 0.55, speedScale: 0.94,
-             flashWarnScale: 1.0, flashSafeScale: 0.85, flashOnScale: 1.15 }
+  // P4.8 还原：完整回退到早期可玩版梯度——困难档速度更快(1.15)而非更慢。
+  easy:    { name: '简单', maxHP: 3, warnScale: 1.3, safeScale: 1.3, speedScale: 0.9 },
+  normal:  { name: '普通', maxHP: 2, warnScale: 1.0, safeScale: 1.0, speedScale: 1.0 },
+  hard:    { name: '困难', maxHP: 1, warnScale: 0.7, safeScale: 0.7, speedScale: 1.15 }
 };
 let currentDifficulty = 'normal';
 let MAXHP = 2;  // 运行时根据难度动态设置
@@ -1937,12 +1928,10 @@ const TUT_HINTS_BY_LEVEL = [
     { x: 1350, text: '落石之间只有 0.6 秒空档，跳缺口要卡这一个空隙' },
     { x: 2450, text: '最后一段最密——踩准节奏，别在石头下停' }
   ],
-  // ---- 第 5 关 · 展柜对视：全机制融合，新机制「观众闪光灯」，高台是避难所 ----
-  // 时机必须贴住玩法：第一个观众在 x=280、第一块高台在 x=400-600。
-  // 原来"跳高台"提示在 x=800——玩家读到时高台已经走过了。提前到 380（高台正下方）。
+  // ---- 第 5 关 · 展柜对视：全机制融合，新机制「激光」，灯头下方是盲区 ----
   [
-    { x: 200,  text: '举手机的观众会闪光——它脚下红圈就是范围，手机一亮就跑' },
-    { x: 380,  text: '跳上绿色箭头的石台——出了红圈，高台是避难所' },
+    { x: 200,  text: '激光从灯头射出——站在灯头正下方是盲区' },
+    { x: 800,  text: '两道光束交错时，走它们中间的空隙' },
     { x: 1600, text: '最后一段了——稳住节奏，别抢' }
   ]
 ];
@@ -2056,12 +2045,10 @@ function loadLevel(i) {
     // P3.2 难度缩放：预警/激活/安全窗按难度比例调整
     const diff = DIFFICULTIES[currentDifficulty];
     const isFlash = h.t === 'flash';
-    // P4.7：闪光灯走 flash* 专用系数（通用 warnScale/safeScale 保持原值，不动第 2/3 关矿刺）。
-    // 顺带修 bug：原来 c.on = h.on * warnScale，导致困难档爆闪反被缩到 0.09s
-    //（伤害窗更小＝更容易钻过去），与"困难"完全相反；现在困难档爆闪更长(×1.15)。
-    c.warn = h.warn * (isFlash ? diff.flashWarnScale : diff.warnScale);
-    c.on   = h.on   * (isFlash ? diff.flashOnScale   : diff.warnScale);
-    c.off  = h.off  * (isFlash ? diff.flashSafeScale : diff.safeScale);
+    // P4.8 还原为早期版本的统一口径（与备份版一致）
+    c.warn = h.warn * diff.warnScale;
+    c.on   = h.on   * diff.warnScale;
+    c.off  = h.off  * diff.safeScale;
     // rock 专属：每块土块形态都不同（真夯土块从坑壁脱落，形状不规则）
     if (h.t === 'rock') {
       // 6 个环状不规则顶点（归一化 [-1,1]，绘制时按 size 缩放）
@@ -5708,19 +5695,6 @@ function drawPlatforms() {
         ctx.ellipse(px + pw * 0.5, 616, pw * 0.48, 7, 0, 0, Math.PI * 2);
         ctx.fill();
       }
-      // 一眼看懂：台面上方一个向上的绿色箭头，标明「跳上来＝安全避难所」
-      ctx.save();
-      const safeX = px + pw * 0.5;
-      ctx.strokeStyle = 'rgba(150,240,185,0.75)';
-      ctx.fillStyle = 'rgba(150,240,185,0.75)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(safeX, py - 27);
-      ctx.lineTo(safeX - 8, py - 13);
-      ctx.lineTo(safeX + 8, py - 13);
-      ctx.closePath(); ctx.fill();
-      ctx.beginPath(); ctx.moveTo(safeX, py - 27); ctx.lineTo(safeX, py - 39); ctx.stroke();
-      ctx.restore();
     } else {
       ctx.fillStyle = 'rgba(255,235,190,0.30)';
       ctx.fillRect(px, py, pw, 2);
