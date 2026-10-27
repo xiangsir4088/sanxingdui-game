@@ -326,17 +326,13 @@ cv.addEventListener('pointerdown', e => {
   if (IN_IFRAME && state === 'title' && inOpen(p)) { window.open(location.href, '_blank'); return; }
   // 标题页：点击"选关"按钮进入选关菜单（优先于下方"按空格开始"）
   if (state === 'title' && inSelBtn(p)) { state = 'levelSelect'; stateT = 0; sfxBack(); return; }
-  // P3.2 难度选择按钮点击检测
+  // P3.2 难度选择按钮点击检测（P3.4 起改到左下页脚，热区与绘制共用 diffBtnRect）
   if (state === 'title') {
-    const diffKeys = ['easy', 'normal', 'hard'];
-    const diffXs = [W/2 - 110, W/2 - 20, W/2 + 70];
-    for (let i = 0; i < 3; i++) {
-      const bx = diffXs[i] - 30, by = 583, bw = 60, bh = 28;
-      if (p.x >= bx && p.x <= bx + bw && p.y >= by && p.y <= by + bh) {
-        setDifficulty(diffKeys[i]);
-        sfxBack();
-        return;
-      }
+    const di = inDiffBtn(p);
+    if (di >= 0) {
+      setDifficulty(DIFF_KEYS[di]);
+      sfxBack();
+      return;
     }
   }
   // 选关：优先于"按空格开始"，避免误触发
@@ -398,6 +394,23 @@ loadSave();
 /* ---- 选关入口按钮（仅标题页） ---- */
 // 右下角小按钮，与音效/退出按钮同区不打架
 const BTN_SEL = { x: 22, y: 26, w: 132, h: 38 };
+
+/* ---- 标题页难度按钮（P3.4：从版面中央挪到左下页脚） ----
+   原来三颗按钮居中叠在「题眼」正下方，和「开启声音」提示挤成一团。
+   现在中央纵向只留「标题 → 文物 → 题眼」，控制项下放到底部左右两角做页脚。 */
+const DIFF_KEYS = ['easy', 'normal', 'hard'];
+const DIFF_LABELS = ['简单', '普通', '困难'];
+const DIFF_BTN = { x: 108, y: 636, w: 56, h: 28, step: 64 };
+function diffBtnRect(i) {
+  return { x: DIFF_BTN.x + i * DIFF_BTN.step, y: DIFF_BTN.y, w: DIFF_BTN.w, h: DIFF_BTN.h };
+}
+function inDiffBtn(p) {
+  for (let i = 0; i < 3; i++) {
+    const r = diffBtnRect(i);
+    if (p.x > r.x && p.x < r.x + r.w && p.y > r.y && p.y < r.y + r.h) return i;
+  }
+  return -1;
+}
 function inSelBtn(p) {
   return p.x > BTN_SEL.x && p.x < BTN_SEL.x + BTN_SEL.w &&
          p.y > BTN_SEL.y && p.y < BTN_SEL.y + BTN_SEL.h;
@@ -8822,44 +8835,48 @@ function drawTitle() {
   ctx.font = '18px "Microsoft YaHei", serif';
   ctx.fillText('“三千年前的一张脸，只为看你一眼。”', W / 2, 580);
 
-  // P3.2 难度选择（三档：简单/普通/困难）
+  // ---- 页脚左：难度选择（三档：简单/普通/困难）----
+  // 边界：内框线在 y=696、左下角云雷纹占 x 22~52 / y 668~698，所以内容从 x=62 起、基线不上 690
+  ctx.textAlign = 'left';
   ctx.font = '14px "Microsoft YaHei", sans-serif';
   ctx.fillStyle = 'rgba(180,210,190,0.7)';
-  ctx.fillText('难度：', W / 2 - 180, 604);
-  const diffKeys = ['easy', 'normal', 'hard'];
-  const diffLabels = ['简单', '普通', '困难'];
+  ctx.fillText('难度', 62, 655);
   for (let i = 0; i < 3; i++) {
-    const dx = W / 2 - 110 + i * 90;
-    const dy = 597;
-    const isActive = currentDifficulty === diffKeys[i];
-    const btnX = dx - 30, btnY = dy - 14, btnW = 60, btnH = 28;
-    ctx.fillStyle = isActive ? 'rgba(255,210,120,0.25)' : 'rgba(60,80,70,0.3)';
-    ctx.fillRect(btnX, btnY, btnW, btnH);
-    ctx.strokeStyle = isActive ? 'rgba(255,210,120,0.8)' : 'rgba(100,120,110,0.4)';
+    const r = diffBtnRect(i);
+    const isActive = currentDifficulty === DIFF_KEYS[i];
+    ctx.fillStyle = isActive ? 'rgba(255,210,120,0.22)' : 'rgba(60,80,70,0.28)';
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.strokeStyle = isActive ? 'rgba(255,210,120,0.85)' : 'rgba(100,120,110,0.38)';
     ctx.lineWidth = isActive ? 2 : 1;
-    ctx.strokeRect(btnX, btnY, btnW, btnH);
+    ctx.strokeRect(r.x, r.y, r.w, r.h);
     ctx.fillStyle = isActive ? 'rgba(255,240,190,1)' : 'rgba(150,180,170,0.7)';
     ctx.font = isActive ? '600 14px "Microsoft YaHei", sans-serif' : '13px "Microsoft YaHei", sans-serif';
-    ctx.fillText(diffLabels[i], dx, dy + 5);
+    ctx.textAlign = 'center';
+    ctx.fillText(DIFF_LABELS[i], r.x + r.w / 2, r.y + 19);
+    ctx.textAlign = 'left';
   }
 
-  // 浏览器要求"用户交互"后才放行音频：只用手柄开始会全程静音，这里明确提示
-  // y 从 612 下移到 632：难度按钮行占 583~611，原位置与按钮重叠成一团
-  if (!audioStarted) {
-    ctx.fillStyle = `rgba(255,205,130,${0.6 + 0.4 * Math.sin(tGlobal * 4)})`;
-    ctx.font = '13px "Microsoft YaHei", sans-serif';
-    ctx.fillText('· 点一下画面或按一下键盘，开启声音 ·', W / 2, 632);
-  }
-
-  // 开始
+  // ---- 页脚右：操作说明在上、"按空格开始"在下（右对齐，与左下难度块对称）----
+  // 右边界 1210：右下角云雷纹从 1228 起，不能压过去
+  const RX = W - 70;
+  ctx.textAlign = 'right';
+  ctx.fillStyle = 'rgba(150,180,170,0.42)';
+  ctx.font = '12px "Microsoft YaHei", sans-serif';
+  ctx.fillText('键盘：← → / A D 移动 · 空格 跳跃 · R 重来 · Esc 退出 · M 静音', RX, 626);
+  ctx.fillText('手柄：左摇杆 / 十字键 移动 · 任意键 跳跃 / 确认 · Back / Select 退出', RX, 644);
   ctx.fillStyle = `rgba(255,240,190,${0.55 + 0.45 * Math.sin(tGlobal * 3)})`;
-  ctx.font = '600 21px "Microsoft YaHei", sans-serif';
-  ctx.fillText('按 空格 / Enter / 手柄任意键 开始', W / 2, 660);
+  ctx.font = '600 20px "Microsoft YaHei", sans-serif';
+  ctx.fillText('按 空格 / Enter / 手柄任意键 开始', RX, 672);
 
-  ctx.fillStyle = 'rgba(150,180,170,0.45)';
-  ctx.font = '13px "Microsoft YaHei", sans-serif';
-  ctx.fillText('键盘：← → / A D 移动 · 空格 跳跃 · R 重来 · Esc 退出 · M 静音', W / 2, 684);
-  ctx.fillText('手柄：左摇杆 / 十字键 移动 · 任意键 跳跃 / 确认 · Back / Select 退出', W / 2, 702);
+  // 浏览器要求"用户交互"后才放行音频：只用手柄开始会全程静音
+  // 左右页脚之间正好空着，放这儿；首次交互后自动消失
+  if (!audioStarted) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = `rgba(255,205,130,${0.55 + 0.4 * Math.sin(tGlobal * 4)})`;
+    ctx.font = '13px "Microsoft YaHei", sans-serif';
+    ctx.fillText('· 点一下画面或按一下键盘，开启声音 ·', W / 2, 672);
+  }
+  ctx.textAlign = 'center';
 
   // 手柄状态与实时诊断（放左上角，避开底部居中的按键说明；玩家可能进不了游戏看不到 HUD）
   // x 从 168 开始：让位于左上角的"选关"按钮（BTN_SEL 宽度 154 = x:22 + w:132）
