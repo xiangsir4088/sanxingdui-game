@@ -105,12 +105,63 @@ const ART_ERA_CACHE = {};
 // 只框住器物本体的紧裁框，避免把海报深色底板一起画成一块暗方块
 const ERACROP = { sx: 318, sy: 682, sw: 452, sh: 848 };
 const ART_ERA = {
-  forge:  { f: 'sepia(0.85) saturate(2.1) hue-rotate(-14deg) brightness(1.14) contrast(1.05)', tint: 'rgba(210,150,58,0.28)', tint2: 'rgba(236,206,140,0.10)', dot: '#d0a048' },
-  ritual: { f: 'sepia(0.78) saturate(1.7) hue-rotate(-8deg) brightness(1.14) contrast(1.03)', tint: 'rgba(198,140,52,0.22)', tint2: 'rgba(230,198,132,0.07)', dot: '#bc8a3c' },
-  burial: { f: 'saturate(1.60) brightness(1.18) contrast(1.10)', tint: 'rgba(20,112,68,0.50)', tint2: 'rgba(132,208,158,0.16)', dot: '#7fa86a' },
-  dig:    { f: 'sepia(0.62) saturate(0.72) brightness(1.22) contrast(1.02)', tint: 'rgba(148,120,74,0.40)', tint2: 'rgba(212,192,150,0.14)', dot: '#a89878' },
-  museum: { f: 'saturate(1.22) brightness(1.26) contrast(1.06)', tint: 'rgba(40,146,112,0.30)', tint2: 'rgba(158,228,198,0.14)', dot: '#98c8b0' }
+  // P5.0 去失真：原素材是真实绿锈青铜照，细节锐利。之前 sepia0.85+saturate2.1+hue-rotate(-14)
+  // 把绿锈碾成均匀褐黄，再叠 tint0.28 + 渐变 + 亮斑，四层全覆盖 → 凹槽被填平，成了发光塑料。
+  // 现在只做"上色"，不做"覆盖"：sepia 压到 0.38 留住原图明暗，contrast 提到 1.22 让凹槽变深，
+  // tint 全部砍到 0.10~0.12（金箔是暗金，不是亮黄），去掉 hue-rotate（它是黄绿的元凶）。
+  forge:  { f: '', tint: 'rgba(188,132,42,0)', tint2: 'rgba(236,206,140,0)', dot: '#c08c34' },
+  ritual: { f: 'saturate(1.30) sepia(0.30) brightness(1.04) contrast(1.18)', tint: 'rgba(176,120,38,0.10)', tint2: 'rgba(230,198,132,0)', dot: '#b07a30' },
+  burial: { f: 'saturate(1.35) brightness(1.06) contrast(1.16)', tint: 'rgba(22,104,66,0.22)', tint2: 'rgba(132,208,158,0.05)', dot: '#7fa86a' },
+  dig:    { f: 'sepia(0.40) saturate(0.85) brightness(1.10) contrast(1.10)', tint: 'rgba(148,120,74,0.20)', tint2: 'rgba(212,192,150,0.06)', dot: '#a89878' },
+  museum: { f: 'saturate(1.10) brightness(1.14) contrast(1.10)', tint: 'rgba(40,146,112,0.16)', tint2: 'rgba(158,228,198,0.05)', dot: '#98c8b0' }
 };
+
+/* P5.0 熔金皮相：亮度 → 金箔色阶
+   为什么不用 sepia/tint：那只是给整张图"刷一层黄漆"，凹槽和暗部被一起染亮，
+   出来就是均匀土黄 + 发光塑料感。金箔本身是「单一金色相 + 原有明暗起伏」，
+   所以正确做法是把原图的亮度重新映射到一条暗金→高光的色阶上，纹理自然留下。
+   权重 0.75：留 25% 原色残调，斑驳绿锈变成"金箔下的铜锈"，不至于变成纯色块。 */
+function goldRamp(g, AW, AH) {
+  const img = g.getImageData(0, 0, AW, AH);
+  const d = img.data;
+  const n = AW * AH;
+  // 2%/98% 分位拉伸（256 桶直方图，O(n)），防止整器偏暗或过曝
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < n; i++) {
+    const o = i * 4;
+    hist[(d[o] * 0.299 + d[o + 1] * 0.587 + d[o + 2] * 0.114) | 0]++;
+  }
+  let acc = 0, lo = 0, hi = 255;
+  for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= n * 0.02) { lo = v; break; } }
+  acc = 0;
+  for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= n * 0.02) { hi = v; break; } }
+  if (hi <= lo) hi = lo + 1;
+  const SPAN = hi - lo;
+  // 金箔色阶：暗棕 → 褐金 → 亮金 → 高光
+  const STOPS = [[0, 46, 28, 10], [0.30, 107, 68, 20], [0.60, 168, 114, 40], [0.82, 212, 162, 80], [1, 244, 221, 164]];
+  const rampAt = (t) => {
+    for (let k = 1; k < STOPS.length; k++) {
+      if (t <= STOPS[k][0]) {
+        const a = STOPS[k - 1], b = STOPS[k];
+        const u = (t - a[0]) / (b[0] - a[0]);
+        return [a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u, a[3] + (b[3] - a[3]) * u];
+      }
+    }
+    return [244, 221, 164];
+  };
+  for (let i = 0; i < n; i++) {
+    const o = i * 4;
+    if (d[o + 3] === 0) continue;
+    const l = d[o] * 0.299 + d[o + 1] * 0.587 + d[o + 2] * 0.114;
+    let t = (l - lo) / SPAN;
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    const c = rampAt(t);
+    d[o] = c[0] * 0.75 + d[o] * 0.25;
+    d[o + 1] = c[1] * 0.75 + d[o + 1] * 0.25;
+    d[o + 2] = c[2] * 0.75 + d[o + 2] * 0.25;
+  }
+  g.putImageData(img, 0, 0);
+}
 
 function getArtifactEraCanvas(eraName) {
   if (ART_ERA_CACHE[eraName]) return ART_ERA_CACHE[eraName];
@@ -118,7 +169,7 @@ function getArtifactEraCanvas(eraName) {
   // 熔金时代只取头部（下面那截长銎不画），读起来才像一汪金水滴
   const frac = eraName === 'forge' ? 0.62 : 1;
   const sh = ERACROP.sh * frac;
-  const AW = 260;
+  const AW = 340;
   const AH = Math.round(AW * sh / ERACROP.sw);
   const c = document.createElement('canvas');
   c.width = AW; c.height = AH;
@@ -128,6 +179,8 @@ function getArtifactEraCanvas(eraName) {
   g.filter = cfg.f;
   g.drawImage(poster, ERACROP.sx, ERACROP.sy, ERACROP.sw, sh, 0, 0, AW, AH);
   g.filter = 'none';
+  // 熔金：走亮度→金箔色阶映射（见 goldRamp 注释），不套 sepia/tint
+  if (eraName === 'forge') goldRamp(g, AW, AH);
 
   g.globalCompositeOperation = 'source-atop';
   g.fillStyle = cfg.tint;
@@ -140,27 +193,27 @@ function getArtifactEraCanvas(eraName) {
   const rnd = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
 
   if (eraName === 'forge') {
-    // 熔金：自下而上的金属流痕 + 液滴亮核（真实金箔暗金质感，不再"发光艳金"）
+    // 熔金：自下而上的金属流痕 + 液滴亮核（只留极淡的一层，别把细节糊掉）
     const lg = g.createLinearGradient(0, AH, 0, 0);
-    lg.addColorStop(0, 'rgba(236,206,140,0.26)');
-    lg.addColorStop(0.45, 'rgba(210,160,72,0.10)');
-    lg.addColorStop(1, 'rgba(240,226,180,0.12)');
+    lg.addColorStop(0, 'rgba(236,206,140,0.10)');
+    lg.addColorStop(0.45, 'rgba(210,160,72,0.03)');
+    lg.addColorStop(1, 'rgba(240,226,180,0.05)');
     g.fillStyle = lg;
     g.fillRect(0, 0, AW, AH);
-    for (let i = 0; i < 10; i++) {
-      const x = rnd() * AW, y = rnd() * AH, r = 1.2 + rnd() * 3.0;
-      const rg = g.createRadialGradient(x, y, 0, x, y, r * 2.4);
-      rg.addColorStop(0, 'rgba(255,250,214,0.42)');
+    for (let i = 0; i < 3; i++) {
+      const x = rnd() * AW, y = rnd() * AH, r = 1.0 + rnd() * 1.8;
+      const rg = g.createRadialGradient(x, y, 0, x, y, r * 2.2);
+      rg.addColorStop(0, 'rgba(255,248,208,0.14)');
       rg.addColorStop(1, 'rgba(214,160,64,0)');
       g.fillStyle = rg;
-      g.beginPath(); g.arc(x, y, r * 2.4, 0, Math.PI * 2); g.fill();
+      g.beginPath(); g.arc(x, y, r * 2.2, 0, Math.PI * 2); g.fill();
     }
   } else if (eraName === 'ritual') {
     // 铜身·金光：铜色打底，脸侧仍有成片金光在跳（降为金箔反光，不发光）
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 4; i++) {
       const x = rnd() * AW, y = rnd() * AH, r = 2 + rnd() * 6;
       const rg = g.createRadialGradient(x, y, 0, x, y, r * 2.2);
-      rg.addColorStop(0, 'rgba(238,206,140,0.34)');
+      rg.addColorStop(0, 'rgba(238,206,140,0.16)');
       rg.addColorStop(1, 'rgba(190,128,48,0)');
       g.fillStyle = rg;
       g.beginPath(); g.arc(x, y, r * 2.2, 0, Math.PI * 2); g.fill();
@@ -215,7 +268,7 @@ function getArtifactEraCanvas(eraName) {
   g.globalCompositeOperation = 'destination-in';
   const mk = g.createRadialGradient(AW / 2, AH * 0.5, 0, AW / 2, AH * 0.5, Math.max(AW, AH) * 0.62);
   mk.addColorStop(0, 'rgba(0,0,0,1)');
-  mk.addColorStop(0.66, 'rgba(0,0,0,1)');
+  mk.addColorStop(0.80, 'rgba(0,0,0,1)');
   mk.addColorStop(1, 'rgba(0,0,0,0)');
   g.fillStyle = mk;
   g.fillRect(0, 0, AW, AH);
@@ -231,8 +284,9 @@ function drawArtifactEra(cx, cy, dh, eraName, alpha) {
   const dw = dh * rec.ar;
   ctx.save();
   ctx.globalAlpha = alpha === undefined ? 1 : alpha;
-  // lighter 让紧裁框里残留的一点点深色底直接消失，只留器物本身在发光
-  ctx.globalCompositeOperation = 'lighter';
+  // P5.0 去失真（关键）：原来是 'lighter' 加色混合——暗部被抬亮、永远不黑，整器等于自发光，
+  // 所以不管怎么调滤镜都是"发光塑料"。改回正常混合，暗部才真的暗，青铜的体积和凹槽才出来。
+  ctx.globalCompositeOperation = 'source-over';
   ctx.drawImage(rec.cv, cx - dw / 2, cy - dh / 2, dw, dh);
   ctx.restore();
   return true;
@@ -12353,7 +12407,7 @@ function drawEnding() {
     if (p > 0.92) continue;                             // 尾部留空档，避免首尾相接
     const x = W / 2 + Math.cos(seed * 5.1) * 128 + Math.sin(tGlobal * 0.6 + i * 1.7) * 14;
     const y = 300 - p * 210 - (i % 3) * 12;             // 自铜身上浮
-    const a = Math.sin(p * Math.PI) * 0.62;             // 淡入 → 淡出
+    const a = Math.sin(p * Math.PI) * 0.38;             // 淡入 → 淡出
     const sz = 1.4 + (i % 3) * 0.9;
     ctx.globalAlpha = a;
     ctx.fillStyle = i % 3 === 0 ? '#fff2c0' : '#ffd97a';
@@ -12383,11 +12437,11 @@ function drawEnding() {
   const SIL_PAD = 150;
   const silH = [58, 62, 64, 60, 58];
   const silGlow = [
-    'rgba(255,206,88,0.34)',
-    'rgba(226,160,70,0.24)',
-    'rgba(90,150,110,0.20)',
-    'rgba(150,132,96,0.15)',
-    'rgba(110,182,158,0.22)'
+    'rgba(255,206,88,0.18)',
+    'rgba(226,160,70,0.13)',
+    'rgba(90,150,110,0.11)',
+    'rgba(150,132,96,0.09)',
+    'rgba(110,182,158,0.12)'
   ];
   const silLabels = ['熔金·金水滴', '铜身·金光', '绿锈剥金', '黄土蒙尘', '展柜残光'];
   for (let i = 0; i < 5; i++) {
