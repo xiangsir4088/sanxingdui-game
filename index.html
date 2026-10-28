@@ -419,11 +419,12 @@ addEventListener('lostpointercapture', touchUpHandler);
 /* ================= 存档系统（P0.1） ================= */
 // localStorage 持久化：记录每关的通关状态 + 最佳用时（秒）
 const SAVE_KEY = 'sdx_progress_v1';   // 键名不随版本变，靠内部的 v 字段做迁移
-const SAVE_VER = 2;
+const SAVE_VER = 3;
 const saveData = {
   v: SAVE_VER,
   cleared: [false, false, false, false, false],
   bestTime: [0, 0, 0, 0, 0],   // 0 表示尚未通关
+  bestScore: [0, 0, 0, 0, 0],  // v3 新增：每关历史最高分（含险擦/胆气），重刷的唯一目标
   totalTime: 0                 // 累计游玩秒数（v2 新增）
 };
 // 存档迁移：早期版本没有 v 字段，只能按"已知字段尽量补齐"的方式升上来。
@@ -451,6 +452,12 @@ function migrateSave(j) {
   }
   const tt = +j.totalTime || 0;
   if (isFinite(tt) && tt >= 0) saveData.totalTime = tt;
+  // ---- v2 → v3：新增 bestScore。老存档一律补 0（不是补成某个虚拟分），
+  //      下次通关自然会写入真实值，绝不能用迁移逻辑伪造历史成绩。----
+  const bs = arr5(j.bestScore).map(x => Math.max(0, +x || 0));
+  for (let i = 0; i < 5; i++) {
+    if (saveData.bestScore[i] !== bs[i]) { saveData.bestScore[i] = bs[i]; touched = true; }
+  }
   if (ver !== SAVE_VER) touched = true;
   saveData.v = SAVE_VER;
   return touched;
@@ -472,10 +479,12 @@ function fmtTime(t) {
   return m + ':' + String(s).padStart(2, '0');
 }
 // 通关时调用：写入通关标记 + 最佳用时（更短才覆盖）
-function recordClear(levelIdx, timeSec) {
+function recordClear(levelIdx, timeSec, score) {
   saveData.cleared[levelIdx] = true;
   const prev = saveData.bestTime[levelIdx];
   if (!prev || timeSec < prev) saveData.bestTime[levelIdx] = timeSec;
+  const ps = saveData.bestScore[levelIdx] || 0;
+  if ((+score || 0) > ps) saveData.bestScore[levelIdx] = Math.round(score);
   saveData.totalTime = Math.max(0, (+saveData.totalTime || 0)) + Math.max(0, timeSec || 0);
   persistSave();
 }
@@ -1025,6 +1034,18 @@ function sfxJump()  { if (!audioMuted) tone(300, 0.16, 'square', 0.28, 640); }
 function sfxLand()  { if (!audioMuted) { noise(0.14, 0.38, 230, 0.9); tone(95, 0.12, 'sine', 0.24); } }
 function sfxCoin()  { if (audioMuted) return; tone(880, 0.10, 'sine', 0.32); setTimeout(() => tone(1320, 0.20, 'sine', 0.28), 60); }
 function sfxHit()   { if (!audioMuted) { noise(0.22, 0.52, 300, 1.0); tone(150, 0.28, 'sawtooth', 0.28, 70); } }
+/* 险擦：极短的高频"擦"声 + 紧接一记心跳低频。配合顿帧，就是"差一点死"的听觉签名。 */
+function sfxCloseCall() {
+  if (audioMuted) return;
+  tone(1900, 0.07, 'sine', 0.24, 2600);
+  setTimeout(() => { noise(0.10, 0.26, 900, 1.6); tone(96, 0.26, 'sine', 0.32, 62); }, 40);
+}
+/* 胆气中断：下坠音 + 闷响。比单纯 i-frames 更让人"肉疼"，才会真的想躲。 */
+function sfxNerveBreak() {
+  if (audioMuted) return;
+  tone(300, 0.30, 'triangle', 0.28, 110);
+  setTimeout(() => noise(0.18, 0.22, 240, 0.8), 90);
+}
 function sfxDeath() { if (audioMuted) return; tone(420, 0.60, 'triangle', 0.36, 90); setTimeout(() => noise(0.55, 0.40, 180, 0.8), 80); }
 function sfxClear() { if (audioMuted) return; [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => tone(f, 0.46, 'sine', 0.30), i * 105)); }
 function sfxStart() { if (audioMuted) return; tone(392, 0.32, 'triangle', 0.28); setTimeout(() => tone(587, 0.46, 'sine', 0.26), 110); }
@@ -1959,6 +1980,24 @@ try {
 let haz = [];
 let hurtFlash = 0, deathTimer = 0, shakeT = 0;
 
+/* P5.3 紧张感系统 ————————————————————————————————
+   之前整局只有「挨打 / 没挨打」两种状态：逃得再漂亮也没有任何反馈，
+   玩家自然感觉不到"惊险"，通关一次也就没有"再来一局"的理由。
+   这套系统把「贴着危险边缘活下来」变成一件有回报、看得见的事：
+     · 险擦（Close Call）：从焰尖 22px 内跃过 / 从光爆边缘 26px 内跑过
+     · 胆气（Nerve）：每次险擦 +1，受伤清零；是本关分数的主要来源
+     · 顿帧（Slow-Mo）：险擦瞬间时间降到 28%，0.22s —— 让"差点死"被看见
+   三个东西缺一不可：只有判定没反馈＝没感觉，只有反馈没判定＝骗人。 */
+let nerve = 0;             // 当前胆气层数
+let nerveBest = 0;         // 本关最高胆气（结算用）
+let ccCount = 0;           // 本关险擦次数
+let ccT = 0;               // 险擦浮动文字的剩余寿命
+let ccX = 0, ccY = 0;      // 险擦发生的位置（世界坐标）
+let ccFlash = 0;           // 险擦白闪强度
+let breakT = 0;            // "胆气中断"提示剩余寿命
+let slowT = 0;             // 顿帧剩余（真实秒）
+let levelScore = 0;        // 本关累计得分
+
 /* ---- 逐段旁白 ---- */
 let sub = null, lineIdx = 0;
 
@@ -2103,6 +2142,9 @@ function loadLevel(i) {
   player.hp = MAXHP;
   cam.x = 0;
   collected = 0;
+  // P5.3 紧张感状态：每关从零开始，胆气不能跨关带（否则一关刷满全关受益）
+  nerve = 0; nerveBest = 0; ccCount = 0; ccT = 0; ccFlash = 0;
+  breakT = 0; slowT = 0; levelScore = 0;
   resetStorm();           // 进关重置雷雨计时，别让上一局的闪电串到这局
   motes.length = 0;
   level.motes.forEach((m, mi) => motes.push({ x: m.x, y: m.y, taken: false, shardIdx: mi % 18 }));
@@ -2202,9 +2244,60 @@ function hurt(fromX) {
   player.vy = -440;
   player.grounded = false;
   sfxHit();
+  if (nerve > 0) { nerve = 0; breakT = 1.1; sfxNerveBreak(); }   // P5.3 胆气归零＝真正的惩罚
   if (player.hp <= 0) { deathsThisLevel++; deathTimer = 0.95; deathFlashOn(); sfxDeath(); }
 }
 function deathFlashOn() { hurtFlash = 1.0; }
+
+/* 险擦结算（两个入口共用） ————————————————————
+   原本只做了「几何擦边」（从焰尖 26px 内跃过）。实测那是死路：
+   掠过焰顶时垂直速度约 647px/s，26px 的高度带只持续 0.04s＝水平 14px，
+   而水平重叠区宽 100px —— 415 个起跳采样里只有 1~2% 能擦到，起跳精度要求 4px。
+   稀缺到这种程度的反馈，等于没有反馈。
+   所以真正的入口是「时间擦边」：火马上就要喷了，你还在它地盘上。
+   判据简单、玩家可主动追求，而且把"站着等安全窗"从无风险行为变成一次下注。 */
+function grantCloseCall(risk) {
+  if (Math.abs(player.vx) < 150) return false;   // 必须是冲过去，不是蹭过去
+  if (player.inv > 0 || deathTimer > 0) return false;
+  nerve++;
+  ccCount++;
+  if (nerve > nerveBest) nerveBest = nerve;
+  /* 连击越高越值钱，而且「越贴死亡线」越值钱（risk 0→1）。
+     这条是整套系统的动机核心：玩家不是被要求冒险，是被分数勾着主动去冒险。 */
+  levelScore += Math.round((150 + (nerve - 1) * 60) * (1 + (risk || 0) * 0.9));
+  ccT = 0.85;
+  ccX = player.x;
+  ccY = player.y - 40;
+  /* 反馈强度按 risk 分档：
+     原来想把 risk 绑在 remain 上（越贴喷发越强），但触发点是 remain 刚跌破 0.10 的那一帧，
+     risk 恒接近 0，顿帧永远不会触发——等于白写。
+     现在 risk 由「判定方式」决定（几何擦边/激光贴脸更险、给更强反馈），
+     顿帧则每次都固定 0.14s：这是"差一点"的打击感，不能没有，也不该长到拖节奏。 */
+  ccFlash = 0.5 + (risk || 0) * 0.5;
+  slowT = Math.max(slowT, 0.14);
+  player.goldFlash = Math.max(player.goldFlash, 0.18 + (risk || 0) * 0.16);
+  sfxCloseCall();
+  return true;
+}
+
+/* 几何擦边：玩家碰撞体到危险边界的净距离（正数＝在外面）。
+   锁存用 _ccDone，由「危险物停火」重置——每轮开火只算一次。 */
+function tryCloseCall(h, gap) {
+  if (h.t === 'laser') return;             // 激光走独立的贴脸判定（带冷却，见 laser 分支）
+  if (h._ccDone) return;
+  if (gap <= 0 || gap > 26) return;
+  if (grantCloseCall(1.0)) h._ccDone = true;   // 真的从焰尖上擦过去，最险，给满反馈
+}
+
+/* 时间擦边：remain＝距下一次喷发还剩几秒。
+   锁存用周期号 _ccTimeCyc——每个危险周期只结算一次，跨周期自动恢复。
+   阈值 0.10s + 水平 20px 是实测出来的：L1 有 38/76 的等待时长属于"保守通过"不会触发，
+   L2/L3 因为安全窗只比通过时间多 0.2s，踩点通过几乎必然触发——那正是它们该有的紧张度。 */
+function tryTimeCloseCall(h, remain, cyc) {
+  if (h._ccTimeCyc === cyc) return;
+  if (!(remain > 0) || remain > 0.10) return;
+  if (grantCloseCall(0.55)) h._ccTimeCyc = cyc;
+}
 
 function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
 
@@ -2235,6 +2328,18 @@ function updateHazards(dt) {
       h.firing = true;
       h.cur = cx;
       h.rect = { x: cx - h.w / 2, y: h.y, w: h.w, h: h.hgt };
+      /* P5.3 激光贴脸：身体和光束同高、水平只差一点——就是在"躲"而不是"跑开"。
+         激光是持续扫动的，没有周期锁存，改用 0.9s 冷却限制频率，保证擦一次算一次。 */
+      h._ccCool = Math.max(0, (h._ccCool || 0) - dt);
+      if (h._ccCool <= 0 && player.inv <= 0 && deathTimer <= 0 &&
+          player.y + player.r > h.y && player.y - player.r < h.y + h.hgt) {
+        const gapL = (cx - h.w / 2) - (player.x + hw);
+        const gapR = (player.x - hw) - (cx + h.w / 2);
+        const gap = Math.max(gapL, gapR);
+        if (gap > 0 && gap < 26 && grantCloseCall(1 - gap / 26)) {
+          h._ccCool = 0.9;
+        }
+      }
     } else if (h.t === 'flash') {
       // 观众闪光灯：点光源迸发，圆形范围判定，不用 rect。
       // 三个阶段：aim（举起手机、屏幕亮起＝预警）→ burst（爆闪）→ rest（回电）
@@ -2296,6 +2401,10 @@ function updateHazards(dt) {
           h.phase = 'impact';
           h.phaseP = 0;
           h._impactPlayed = false;
+          /* P5.3 落石擦身：土块砸地那一瞬人就在旁边 75px 内、而且正在跑——
+             这是第 4 关唯一的"差一点"时刻。站着不动不算（grantCloseCall 里有 vx 门槛），
+             所以玩家必须贴着落点冲过去才拿得到，纯躲是拿不到的。 */
+          if (Math.abs(player.x - h.x) < 75) grantCloseCall(0.75);
           // 生成碎块：1 主残块（原 rock 主体，较小，落到地面）+ 2 小碎片飞散
           h.shards = [];
           // 主残块：size 缩到 0.55，作为"碎裂后剩下的核心"
@@ -2397,22 +2506,45 @@ function updateHazards(dt) {
       if (h.firing && h.cur > 8) {
         h.rect = { x: h.x - h.w / 2, y: h.gy - h.cur, w: h.w, h: h.cur };
       }
+      // P5.3 距下一次喷发还剩多久（正在燃烧记 0）——时间擦边的判据
+      h._cyc = Math.floor((tGlobal + (h.ph || 0)) / per);
+      h.remain = h.firing ? 0 : (tp < h.warn ? h.warn - tp : per - tp);
     }
 
     // 闪光灯：点光源迸发，用圆判定（rect 的方形包围盒会在四角误伤）
     if (h.t === 'flash' && h.burstR > 6 && player.inv <= 0 && deathTimer <= 0) {
       const fx = player.x - h.bx, fy = player.y - h.by;
       const fr = h.burstR + player.r * 0.50;
-      if (fx * fx + fy * fy < fr * fr) hurt(h.bx);
+      const d2 = fx * fx + fy * fy;
+      if (d2 < fr * fr) hurt(h.bx);
+      else tryCloseCall(h, Math.sqrt(d2) - fr);   // P5.3 擦着光爆边缘跑过
     }
 
     if (h.rect && player.inv <= 0 && deathTimer <= 0) {
       const r = h.rect;
-      if (player.x + hw > r.x && player.x - hw < r.x + r.w &&
-          player.y + player.r > r.y && player.y - player.r < r.y + r.h) {
+      const ovX = player.x + hw > r.x && player.x - hw < r.x + r.w;
+      if (ovX && player.y + player.r > r.y && player.y - player.r < r.y + r.h) {
         hurt(r.x + r.w / 2);
+      } else if (ovX && player.y + player.r <= r.y) {
+        // P5.3 从焰尖/激光上沿跃过：脚底到危险顶端的距离＝这一跳有多险
+        tryCloseCall(h, r.y - (player.y + player.r));
       }
     }
+
+    /* P5.3 时间擦边：火还有不到 0.10s 就要喷，人刚穿过它旁边、正在离开。
+       两个必要条件缺一不可：
+         ① remain < 0.10   —— 火马上要喷，这是"踩点"
+         ② sideDist > 0    —— 已经越过火柱中心、在前进方向那一侧
+       ② 是防致命的：玩家若还停在火柱"入口侧"，一起跑就会在 0.05s 后进判定区，
+       而穿过需要 0.28s——那是必死。奖励完立刻烧死比不给奖励更糟。 */
+    const sideDist = (player.x - h.x) * (player.vx >= 0 ? 1 : -1);
+    if (h.remain > 0 && h.remain < 0.10 && sideDist > 0 &&
+        sideDist < h.w / 2 + hw + 20) {
+      tryTimeCloseCall(h, h.remain, h._cyc);
+    }
+
+    // 危险物一旦停火就解除锁存，下一轮还能再擦一次
+    if (!h.firing) h._ccDone = false;
   }
 }
 
@@ -2512,6 +2644,7 @@ function step(dt) {
     if (dx * dx + dy * dy < 3400) {
       m.taken = true;
       collected++;
+      levelScore += 100;   // P5.3 基础分，和险擦分一起构成总分
       sfxCoin();
       player.goldFlash = 1.8;
       // 收集微震：比受伤震屏更轻微、更短促的正向反馈
@@ -2537,7 +2670,15 @@ function step(dt) {
                  Math.abs((player.y + player.r) - level.goal.y) < 100;
   if (atGoal && collected >= level.motes.length) {
     lastLevelTime = tGlobal - levelStartT;   // 本关实际用时（秒）
-    recordClear(levelIdx, lastLevelTime);      // 写入存档
+    /* P5.3 结算：时间奖励（快＝分高）+ 零死亡奖励。
+       险擦分在过程中已累加，于是「贴着危险一路冲」比「慢慢摸过去」分高得多——
+       这就是重刷的动机：玩家会自己去找更险的打法。 */
+    const timeBonus = Math.max(0, Math.round((level.width / SPEED + 2.2 - lastLevelTime) * 80));
+    /* 难度乘数：困难 1.35 / 简单 0.85。没有这个，高难度只有受罪没有回报，
+       没人会去挑战——而"敢不敢打困难"本身就是重玩动力的一部分。 */
+    const diffMul = { easy: 0.85, normal: 1.0, hard: 1.35 }[currentDifficulty] || 1;
+    levelScore = Math.round((levelScore + timeBonus + (deathsThisLevel === 0 ? 300 : 0)) * diffMul);
+    recordClear(levelIdx, lastLevelTime, levelScore);      // 写入存档
     if (level.finale) {
       // 第 2 关「碎器」/ 第 4 关「拼合」：不走通用的时代之门，改演自己的收尾。
       // 成绩已在上面记完，演出怎么演都不影响用时与存档。
@@ -9628,6 +9769,28 @@ function drawHUD() {
     }
   }
 
+  // P5.3 胆气：只在有胆气时出现。跳动 + 金色脉冲＝"你现在很猛"的唯一凭证
+  if (nerve > 0) {
+    const pulse = 1 + 0.10 * Math.sin(tGlobal * 11);
+    const nx = 432, ny = 168;
+    ctx.save();
+    ctx.font = '600 ' + Math.round(15 * pulse) + 'px "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.shadowColor = 'rgba(255,190,70,0.80)';
+    ctx.shadowBlur = 9 + Math.min(nerve, 12) * 1.8;
+    ctx.fillStyle = 'rgba(255,226,152,0.98)';
+    ctx.fillText('胆气 ×' + nerve, nx, ny);
+    ctx.shadowBlur = 0;
+    // 层数刻度：一眼看出"离下一档还差几层"，才会想再贪一次
+    for (let i = 0; i < Math.min(nerve, 12); i++) {
+      ctx.beginPath();
+      ctx.arc(nx + 86 + i * 11, ny - 5, 3.2, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,206,110,' + (0.50 + 0.045 * i) + ')';
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
   // 进度
   /* 这条进度条原来在 y=150，而「光尘 0/4」的 15px 字顶也在 150——
      结果一条 380px 宽的横线正好从字头穿过去，"光尘"两个字上多了一道杠。
@@ -12339,14 +12502,29 @@ function drawClear() {
   ctx.textBaseline = 'alphabetic';
   ctx.font = '11px "Microsoft YaHei", sans-serif';
   ctx.fillStyle = 'rgba(220,210,180,0.72)';
-  ctx.fillText('评级', W / 2 - 250, 328);
+  /* 阵亡次数并进「评级」标签：原来单开一行放在 y=348，
+     而 356 是居中的 level.line（约 540px 宽），会直接压过去。合成一行就没有这个冲突。 */
+  ctx.fillText('评级' + (deathsThisLevel > 0 ? ' · 阵亡 ' + deathsThisLevel + ' 次' : ''),
+    W / 2 - 250, 328);
   ctx.restore();
-  if (deathsThisLevel > 0) {
-    ctx.textAlign = 'center';
-    ctx.font = '12px "Microsoft YaHei", sans-serif';
-    ctx.fillStyle = 'rgba(200,200,180,0.62)';
-    ctx.fillText('阵亡 ' + deathsThisLevel + ' 次', W / 2 + 250, 292);
-  }
+
+  // P5.3 本关得分 / 历史最高分：险擦的价值只有被计成数字，玩家才会为它冒险
+  const bestScoreNow = saveData.bestScore[levelIdx] || 0;
+  const isScoreBest = levelScore > 0 && levelScore >= bestScoreNow;
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.font = '800 30px "Microsoft YaHei", serif';
+  ctx.shadowColor = 'rgba(255,200,90,0.55)';
+  ctx.shadowBlur = 12;
+  ctx.fillStyle = isScoreBest ? '#ffd45e' : 'rgba(255,232,170,0.92)';
+  ctx.fillText(String(Math.round(levelScore)), W / 2 + 250, 288);
+  ctx.shadowBlur = 0;
+  ctx.font = '11px "Microsoft YaHei", sans-serif';
+  ctx.fillStyle = 'rgba(220,210,180,0.72)';
+  ctx.fillText(bestScoreNow > 0
+    ? (isScoreBest ? '本关得分 · ★ 新纪录' : '本关得分 · 最高 ' + bestScoreNow)
+    : '本关得分', W / 2 + 250, 328);
+  ctx.restore();
   ctx.fillStyle = 'rgba(200,230,215,0.8)';
   ctx.font = '18px "Microsoft YaHei", sans-serif';
   ctx.fillText(level.line, W / 2, 356);
@@ -12594,6 +12772,53 @@ function render() {
     ctx.fillRect(0, 0, W, H);
   }
 
+  /* P5.3 险擦演出：金白闪 + 内缩快门框。
+     用暖金而不是纯白——纯白会被误读成"又受伤了"，暖金才是"你赢了这一下"。 */
+  if (state === 'play' && ccFlash > 0) {
+    ctx.fillStyle = `rgba(255,238,200,${(ccFlash * 0.20).toFixed(3)})`;
+    ctx.fillRect(0, 0, W, H);
+    ctx.save();
+    ctx.strokeStyle = `rgba(255,232,170,${(ccFlash * 0.80).toFixed(3)})`;
+    ctx.lineWidth = 3;
+    const m = 12 + (1 - ccFlash) * 30;      // 框由内向外散开，就是快门的"咔"
+    ctx.strokeRect(m, m, W - m * 2, H - m * 2);
+    ctx.restore();
+  }
+
+  // P5.3「险！」浮字 + 连击数：唯一的即时夸奖，必须有
+  if (state === 'play' && ccT > 0) {
+    const k = 1 - ccT / 0.85;
+    const sx = ccX - cam.x, sy = ccY - k * 48;
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(1, (1 - k) * 1.9));
+    ctx.textAlign = 'center';
+    ctx.font = '800 ' + Math.round(26 + k * 14) + 'px "Microsoft YaHei", sans-serif';
+    ctx.shadowColor = 'rgba(255,200,90,0.92)';
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = 'rgba(255,242,194,0.98)';
+    ctx.fillText('险！', sx, sy);
+    if (nerve > 1) {
+      ctx.font = '700 16px "Microsoft YaHei", sans-serif';
+      ctx.fillStyle = 'rgba(255,214,130,0.94)';
+      ctx.fillText('×' + nerve + ' 连', sx, sy + 21);
+    }
+    ctx.restore();
+  }
+
+  // P5.3 胆气中断：受伤时把"你丢了什么"说清楚，否则玩家不知道心疼
+  if (state === 'play' && breakT > 0) {
+    const k = 1 - breakT / 1.1;
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(1, (1 - k) * 1.7));
+    ctx.textAlign = 'center';
+    ctx.font = '800 23px "Microsoft YaHei", sans-serif';
+    ctx.shadowColor = 'rgba(0,0,0,0.85)';
+    ctx.shadowBlur = 9;
+    ctx.fillStyle = 'rgba(255,118,88,0.96)';
+    ctx.fillText('胆气中断', W / 2, H * 0.30 - k * 18);
+    ctx.restore();
+  }
+
   // intro / clear / entering 会在下面各自盖一层近不透明的演出层（0.94 / 0.86），
   // 但 HUD 是先画的——剩下那 6%~14% 会透出来变成一层"鬼影文字"，直接压在
   // 介绍页自己的标题上（左上角「关卡名＋三千年演化徽章＋键盘手柄提示＋光尘计数」
@@ -12627,10 +12852,20 @@ let acc = 0;
 function frame(now) {
   const raw = (now - last) / 1000;
   last = now;
-  const dt = Math.min(raw, 0.05);
+  const dt0 = Math.min(raw, 0.05);
+  /* P5.3 险擦顿帧：险擦后 0.22s 内时间降到 28%。
+     用 raw（真实时间）递减，否则慢镜会把自己拖长成 0.8s。 */
+  let dt = dt0;
+  if (slowT > 0) {
+    dt = dt0 * 0.28;
+    slowT = Math.max(0, slowT - raw);
+  }
   tGlobal += dt;
   stateT += dt;
   if (player.goldFlash > 0) player.goldFlash = Math.max(0, player.goldFlash - dt);
+  if (ccT > 0) ccT = Math.max(0, ccT - dt);
+  if (breakT > 0) breakT = Math.max(0, breakT - dt);
+  if (ccFlash > 0) ccFlash = Math.max(0, ccFlash - dt0 * 3.4);   // 白闪用真实时间，顿帧期间也要闪完
 
   gatherInput();
 
