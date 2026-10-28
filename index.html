@@ -2178,6 +2178,7 @@ function loadLevel(i) {
   hurtFlash = 0;
   deathTimer = 0;
   shakeT = 0;
+  deathsThisLevel = 0;   // P5.2：之前只声明从没重置/自增，成绩页的死亡数永远是 0
 }
 
 function respawn() {
@@ -2201,7 +2202,7 @@ function hurt(fromX) {
   player.vy = -440;
   player.grounded = false;
   sfxHit();
-  if (player.hp <= 0) { deathTimer = 0.95; deathFlashOn(); sfxDeath(); }
+  if (player.hp <= 0) { deathsThisLevel++; deathTimer = 0.95; deathFlashOn(); sfxDeath(); }
 }
 function deathFlashOn() { hurtFlash = 1.0; }
 
@@ -12316,6 +12317,36 @@ function drawClear() {
   ctx.fillText('第 ' + (levelIdx + 1) + ' 关 · 通过', W / 2, 300);
   ctx.shadowColor = 'transparent';
   ctx.shadowBlur = 0;
+
+  // P5.2 评级徽章：成绩页原来只有"通过"和用时，没有评价——过关没有"打得更好"的目标。
+  // S = 零死亡 + 用时不超目标（宽度/速度 + 2.2s 余量）；A = 零死亡；B = 阵亡 1~2 次；C = 3 次以上。
+  const targetT = level.width / SPEED + 2.2;
+  const rank = deathsThisLevel === 0
+    ? (lastLevelTime <= targetT ? 'S' : 'A')
+    : (deathsThisLevel <= 2 ? 'B' : 'C');
+  const rankCol = { S: '#ffd45e', A: '#bfe3a3', B: '#a6bccb', C: '#8f8f8a' }[rank];
+  ctx.save();
+  ctx.strokeStyle = rankCol;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(W / 2 - 250, 286, 25, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = rankCol;
+  ctx.font = '700 28px "Microsoft YaHei", serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(rank, W / 2 - 250, 287);
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = '11px "Microsoft YaHei", sans-serif';
+  ctx.fillStyle = 'rgba(220,210,180,0.72)';
+  ctx.fillText('评级', W / 2 - 250, 328);
+  ctx.restore();
+  if (deathsThisLevel > 0) {
+    ctx.textAlign = 'center';
+    ctx.font = '12px "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = 'rgba(200,200,180,0.62)';
+    ctx.fillText('阵亡 ' + deathsThisLevel + ' 次', W / 2 + 250, 292);
+  }
   ctx.fillStyle = 'rgba(200,230,215,0.8)';
   ctx.font = '18px "Microsoft YaHei", sans-serif';
   ctx.fillText(level.line, W / 2, 356);
